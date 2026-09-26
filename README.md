@@ -7,11 +7,14 @@ email+password account per psicopedagoga, and proxies `POST /api/voice` to
 in-house latency-aware proxy that fans a chat request out over several free LLM
 providers and fails over between them.
 
-## Run
+## Run locally
 
 ```sh
 DATA_DIR=./data node server.mjs
 ```
+
+Then open `http://localhost:8811` (or `http://127.0.0.1:...`; the microphone needs a
+secure context — see below). No build step, no `npm install`.
 
 Env vars:
 
@@ -51,3 +54,26 @@ Saves are debounced and retried automatically when back online. On a first login
 empty server doc, any pre-existing browser data under the legacy `consultorio.v1` key is
 imported automatically. Use "Descargar copia" / "Cargar copia" in Pacientes for manual
 JSON backups regardless.
+
+## Deploy
+
+Built as a single Docker image (`Dockerfile`, `node:24-alpine`, no npm dependencies) and
+run with `docker-compose.yml` — one `app` service, a named volume (`consultorio-data`) at
+`/data` so `consultorio.db` survives redeploys, no published host port and no external
+network (a reverse proxy such as Coolify/Traefik owns TLS and routing; it needs
+`expose: "3000"` to find the container's port).
+
+```sh
+docker compose up -d --build   # add -p 3000:3000 locally if you want it reachable directly
+```
+
+`GET /api/health` is the healthcheck endpoint (also wired into the image's own
+`HEALTHCHECK`). `index.html` is served with `Cache-Control: no-cache`, and its
+`styles.css`/`app.js` URLs carry a `?v=<build timestamp>` query string baked in at build
+time (`Dockerfile` substitutes `__V__`) so a CDN in front of the deploy (e.g. Cloudflare,
+which caches `.css`/`.js` for hours) always picks up a new build immediately instead of
+serving stale assets under an unchanged URL.
+
+In production, leave `INSECURE_COOKIES` unset: behind a TLS-terminating proxy the session
+cookie is `__Host-consultorio` (`Secure`), matching how the proxy actually terminates TLS
+for the browser.

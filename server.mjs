@@ -550,6 +550,10 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
     if (url.pathname.startsWith('/api/')) {
+      // Unrated and unauthenticated: an orchestrator's healthcheck should never be
+      // throttled or blocked by the same limits that protect the real endpoints.
+      if (req.method === 'GET' && url.pathname === '/api/health') return sendJson(res, 200, { status: 'ok' });
+
       if (!generalLimiter(clientIp(req))) return sendJson(res, 429, { error: 'Demasiadas solicitudes.' });
 
       if (req.method === 'POST' && url.pathname === '/api/signup') return void await handleSignup(req, res);

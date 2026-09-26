@@ -1,0 +1,17 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      DATA_DIR: /data
+      PORT: 3000
+      AI_ROUTER_URL: ${AI_ROUTER_URL:-https://ai-router.becode.com.ar}
+    volumes:
+      - consultorio-data:/data
+
+volumes:
+  consultorio-data:

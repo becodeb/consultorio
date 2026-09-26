@@ -78,7 +78,8 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T9 AI via ai-router (SSE parsing, tolerant JSON extraction, one retry on bad JSON);
       send only first name + surname initial to the model.
 - [x] T10 Polish (Ahora card actions, Semana overlaps) + e2e/screenshots updated.
-- [ ] T11 Dockerfile + docker-compose.yml, GitHub repo, Coolify app, domain, live checks.
+- [x] T11 Dockerfile + docker-compose.yml (files only — GitHub repo, Coolify app, domain
+      and live checks are the coordinator's own follow-up).
 
 ## Acceptance criteria
 
@@ -464,6 +465,40 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   history), `voz.png` (sheet open above the nav, result + Deshacer), `hoy-dark.png`. All
   inspected by hand — no overflow, no nav/FAB overlap, dark mode legible.
 
+- T11 (commit pending, files only): `Dockerfile` (`node:24-alpine`, no npm dependencies —
+  just copies the static files + `server.mjs`), `docker-compose.yml`, `.dockerignore`, and
+  a README "Deploy" section. Added `GET /api/health` (200, unauthenticated, exempt from
+  the general rate limit so an orchestrator's frequent probing is never throttled) and a
+  matching Dockerfile `HEALTHCHECK` (`node -e` hitting it — no `curl`/`wget` dependency
+  needed on Alpine). Cache-busting: `index.html`'s `styles.css`/`app.js` `<link>`/`<script>`
+  URLs carry `?v=__V__`, substituted at build time
+  (`RUN sed -i "s/__V__/$(date +%s)/g" index.html`) so Cloudflare's hours-long `.css`/`.js`
+  cache can never serve a stale asset after a deploy; `index.html` itself already carried
+  `Cache-Control: no-cache` since T7's static file handler, so the browser always re-checks
+  it and immediately picks up the new asset URLs. `RUN mkdir -p /data && chown -R node:node
+  /data /app` before `USER node`, so a fresh named volume mounted at `/data` inherits
+  `node`-owned permissions on first use instead of being root-owned and unwritable.
+  `docker-compose.yml`: one `app` service, `expose: ["3000"]`, no published ports, no
+  external network, named volume `consultorio-data:/data`, `AI_ROUTER_URL` with the
+  documented default via `${AI_ROUTER_URL:-https://ai-router.becode.com.ar}` — no
+  BuildKit-only syntax (plain `build: {context, dockerfile}`, no `--mount=type=cache`).
+
+  Verified with the local Docker daemon (`docker --version` 29.3.1, confirmed reachable):
+  `docker build` succeeded; ran the built image standalone
+  (`docker run -p 18940:3000 -e INSECURE_COOKIES=1 ...`, an arbitrary local port, nothing
+  shared) and confirmed: `GET /api/health` → 200, `index.html` → `Cache-Control: no-cache`
+  with real build-timestamp query strings on both asset URLs, the versioned asset URL
+  itself resolves (200), `POST /api/signup` → 200 (proves `/data` is actually writable by
+  the unprivileged `node` user, not just present), `whoami` inside the container is `node`,
+  `/data/consultorio.db*` is `node`-owned, and the container's own Docker `HEALTHCHECK`
+  reported `healthy` after its start period. `docker compose config` parses the compose
+  file cleanly (the `networks: default` it prints is Compose's ordinary implicit network
+  for inter-container DNS, not a declared external network). Test container, image, and
+  volume were all removed afterward — nothing left running, no `compose up` was run against
+  this box.
+
 ## Next step
 
-T11.
+None — T1–T11 (files) all done. GitHub repo creation, the Coolify app, the
+`consultorio.becode.com.ar` domain, and post-deploy live checks are explicitly the
+coordinator's own follow-up, per the phase-2 instructions.

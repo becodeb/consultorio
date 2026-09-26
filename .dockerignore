@@ -1,0 +1,7 @@
+.git
+data
+shots
+node_modules
+odd
+tools
+.env*
