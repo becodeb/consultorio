@@ -73,7 +73,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T7 Server storage + auth: node:sqlite users/sessions/docs, scrypt, long-lived
       `__Host-` session cookie, login/signup screen, sync with version check, import of
       existing local data on first login.
-- [ ] T8 Payments: data + Cuentas UI (owed / paid / balance per patient, register payment
+- [x] T8 Payments: data + Cuentas UI (owed / paid / balance per patient, register payment
       prefilled with the owed amount) + voice action `record_payment`.
 - [ ] T9 AI via ai-router (SSE parsing, tolerant JSON extraction, one retry on bad JSON);
       send only first name + surname initial to the model.
@@ -325,6 +325,34 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   *other device's* value (not the local edit) is what's kept, confirming server-wins
   conflict resolution.
 
+- T8 (commit pending): added `payments[]` (`{id,patientId,date,amount,note?}`) to the doc
+  (`emptyDb`/`migrate` updated) and the pure `balanceOf(db,patientId)` (sum of `present`
+  attendance price − sum of payments; positive = owes, 0 = al día, negative = a favor).
+  Cuentas redesigned: two month figures (Atendido = present sessions this month, Cobrado
+  = payments dated this month), an all-time "Te deben" total (sum of only the *positive*
+  balances — a patient with a credit doesn't reduce what others owe), and per-patient rows
+  with a balance chip (red "Debe $X" / green "Al día" / neutral "A favor $X"); tapping a
+  row opens a new patient-accounts sheet (`#accounts-sheet`): balance banner, a payment
+  form prefilled with the owed amount (quick buttons "Todo lo que debe" and, when
+  different, the last session's price), recent sessions and payments with delete-with-
+  confirm on payments. Hoy: a present row shows a subtle "Pagó" button (records a payment
+  of that session's frozen price for that date) that becomes a "Pagado" tag once any
+  payment exists for that patient on that date. Voice: `record_payment` (`amount: null`
+  resolves to the current balance; validation rejects it when the balance isn't positive
+  — "no debe nada" — matching "Joaquín no debe nada, no hice nada" style non-actions), each
+  patient's `balance` added to `buildVoiceContext`, and the `server.mjs` system prompt
+  updated with the new action and balance-aware `reply` guidance (still the OpenAI-
+  compatible client for now; T9 moves the client to ai-router, prompt content carries
+  over).
+
+  Checks: `node --check app.js server.mjs` pass. Playwright/Chromium end to end (signup →
+  seed via `PUT /api/data` → reload): Hoy's "Pagó" quick action marks the session paid
+  (chip becomes "Pagado"); Cuentas shows Atendido/Cobrado/Te deben and an "Al día" chip
+  once the session is paid; the accounts sheet opens, a manual extra payment flips the
+  balance to "A favor $5.000", and deleting a payment recomputes the balance correctly
+  (confirmed the math traces through insertion order for same-date payments, not a bug).
+  No console errors in any of the runs.
+
 ## Next step
 
-T8.
+T9.

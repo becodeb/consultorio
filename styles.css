@@ -295,6 +295,35 @@ dialog#voice-sheet {
 
 .account-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
+/* Cuentas: payments */
+.cuentas-figures { display: flex; gap: 10px; margin: 4px 0 16px; }
+.figure {
+  flex: 1; text-align: center; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 16px; padding: 14px 8px;
+}
+.figure-num { font: 700 22px/1 var(--display); font-variant-numeric: tabular-nums; }
+.figure-label { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.owed-total { text-align: center; color: var(--muted); margin-bottom: 20px; }
+.owed-total strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.balance-chip { border-radius: var(--radius-btn); padding: 6px 12px; font-weight: 700; font-size: 13px; white-space: nowrap; }
+.balance-chip.debe { background: var(--novino-bg); color: var(--novino-fg); }
+.balance-chip.aldia { background: var(--vino-bg); color: var(--vino-fg); }
+.balance-chip.favor { background: var(--line); color: var(--muted); }
+.paid-tag { color: var(--vino-fg); font-weight: 700; font-size: 14px; }
+
+/* Patient accounts sheet */
+.accounts-balance {
+  text-align: center; font: 700 22px/1 var(--display); padding: 14px; border-radius: 14px; margin-bottom: 16px;
+}
+.accounts-balance.debe { background: var(--novino-bg); color: var(--novino-fg); }
+.accounts-balance.aldia { background: var(--vino-bg); color: var(--vino-fg); }
+.accounts-balance.favor { background: var(--line); color: var(--ink); }
+.quick-amounts { display: flex; gap: 8px; flex-wrap: wrap; margin: -8px 0 14px; }
+.small-list { gap: 6px; margin-bottom: 18px; }
+.small-list .row { padding: 8px 12px; }
+.small-list .name { font-weight: 500; }
+.empty.small { padding: 10px 4px; font-size: 14px; margin-bottom: 18px; }
+
 .day-total {
   display: flex; justify-content: space-between; align-items: baseline;
   margin: 20px 4px 0; color: var(--muted);

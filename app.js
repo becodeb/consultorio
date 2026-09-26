@@ -46,7 +46,7 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function emptyDb() {
-  return { version: 2, patients: [], changes: [], attendance: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
+  return { version: 2, patients: [], changes: [], attendance: [], payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
 }
 
 /** Migrate a v1 payload ({patients,sessions}) to v2 in place. Returns v2 shape unchanged if already v2. */
@@ -54,6 +54,7 @@ function migrate(raw) {
   if (raw && raw.version === 2) {
     if (!raw.changes) raw.changes = [];
     if (!raw.attendance) raw.attendance = [];
+    if (!raw.payments) raw.payments = [];
     if (!raw.settings) raw.settings = { sessionMinutes: DEFAULT_SESSION_MINUTES };
     if (!raw.settings.sessionMinutes) raw.settings.sessionMinutes = DEFAULT_SESSION_MINUTES;
     return raw;
@@ -78,10 +79,32 @@ function migrate(raw) {
     const slot = p ? p.schedule.find(sl => sl.day === wd) : null;
     return { id: s.id, patientId: s.patientId, date: s.date, time: slot ? slot.time : '', status: 'present', price: s.price };
   });
-  return { version: 2, patients, changes: [], attendance, settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
+  return { version: 2, patients, changes: [], attendance, payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
 }
 
 function findPatient(db, id) { return db.patients.find(p => p.id === id); }
+
+/** Positive = the patient owes this amount; negative = they have a credit ("a favor"). */
+function balanceOf(db, patientId) {
+  const owed = db.attendance
+    .filter(a => a.patientId === patientId && a.status === 'present')
+    .reduce((t, a) => t + a.price, 0);
+  const paid = db.payments
+    .filter(p => p.patientId === patientId)
+    .reduce((t, p) => t + p.amount, 0);
+  return owed - paid;
+}
+
+function recordPayment(db, patientId, date, amount, note) {
+  const payment = { id: uid(), patientId, date, amount: Math.round(amount) };
+  if (note) payment.note = note;
+  db.payments.push(payment);
+  return payment;
+}
+
+function deletePayment(db, paymentId) {
+  db.payments = db.payments.filter(p => p.id !== paymentId);
+}
 
 /**
  * Computes the sorted list of appointments that fall on `isoDate`, combining the
@@ -149,7 +172,7 @@ function buildVoiceContext(db) {
   for (let i = 1; i <= 7; i++) { const d = addDays(today, -i); prev7Days.push(`${iso(d)} ${DAYS[d.getDay()]}`); }
 
   const patients = db.patients.map(p => ({
-    id: p.id, name: p.name, price: p.price, schedule: p.schedule, active: p.active,
+    id: p.id, name: p.name, price: p.price, schedule: p.schedule, active: p.active, balance: balanceOf(db, p.id),
   }));
 
   const weekStart = mondayOf(today);
@@ -216,6 +239,15 @@ function validateVoiceAction(db, a) {
     case 'deactivate_patient':
       if (!findPatient(db, a.patientId)) return 'paciente inexistente';
       return null;
+    case 'record_payment': {
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (!ISO_DATE_RE.test(a.date)) return 'fecha inválida';
+      if (a.amount !== null && a.amount !== undefined && !(Number(a.amount) > 0)) return 'monto inválido';
+      if (a.amount === null || a.amount === undefined) {
+        if (!(balanceOf(db, a.patientId) > 0)) return 'no debe nada';
+      }
+      return null;
+    }
     default:
       return 'tipo de acción desconocido';
   }
@@ -239,6 +271,10 @@ function describeVoiceAction(db, a) {
       return `${name}: datos actualizados`;
     case 'deactivate_patient':
       return `${name}: dado de baja`;
+    case 'record_payment': {
+      const amount = (a.amount === null || a.amount === undefined) ? balanceOf(db, a.patientId) : Number(a.amount);
+      return `${name}: pagó ${moneyFmt(amount)}`;
+    }
     default:
       return '';
   }
@@ -277,6 +313,11 @@ function applyVoiceAction(db, a) {
     case 'deactivate_patient':
       findPatient(db, a.patientId).active = false;
       return;
+    case 'record_payment': {
+      const amount = (a.amount === null || a.amount === undefined) ? balanceOf(db, a.patientId) : Math.round(Number(a.amount));
+      recordPayment(db, a.patientId, a.date, amount);
+      return;
+    }
   }
 }
 
@@ -597,11 +638,21 @@ function apptRowHtml(a) {
   const movedBadge = a.moved
     ? `<div class="moved-badge"><span class="moved-pill">Reprogramado</span> antes ${DAY_SHORT[weekdayOf(a.moved.fromDate)]} ${a.moved.fromTime}</div>`
     : '';
+  let payHtml = '';
+  if (status === 'present') {
+    const attRec = db.attendance.find(x => x.patientId === a.patientId && x.date === a.date && x.time === a.time);
+    const sessionPrice = attRec ? attRec.price : p.price;
+    const paidToday = db.payments.some(x => x.patientId === a.patientId && x.date === a.date);
+    payHtml = paidToday
+      ? `<span class="paid-tag">Pagado</span>`
+      : `<button class="btn ghost small" data-act="quick-pay" data-id="${p.id}" data-date="${a.date}" data-amount="${sessionPrice}">Pagó</button>`;
+  }
   const actionsHtml = !status
     ? `<button class="btn-mark vino" data-act="mark" data-status="present" data-id="${p.id}" data-time="${a.time}">${CHECK}Vino</button>
        <button class="btn-mark novino" data-act="mark" data-status="absent" data-id="${p.id}" data-time="${a.time}">${XICON}No vino</button>`
     : `<span class="chip ${status}">${status === 'present' ? 'Vino' : 'No vino'}</span>
-       <button class="btn ghost small" data-act="undo" data-id="${p.id}" data-time="${a.time}">Deshacer</button>`;
+       <button class="btn ghost small" data-act="undo" data-id="${p.id}" data-time="${a.time}">Deshacer</button>
+       ${payHtml}`;
   return `<li class="row appt ${rowClass} ${a.moved ? 'moved' : ''}">
     <div class="row-main">
       <span class="dot" style="background:${p.color}"></span>
@@ -807,12 +858,20 @@ function renderPacientes() {
   app.innerHTML = html;
 }
 
+function balanceChip(balance) {
+  if (balance > 0) return { cls: 'debe', text: `Debe ${moneyFmt(balance)}` };
+  if (balance < 0) return { cls: 'favor', text: `A favor ${moneyFmt(-balance)}` };
+  return { cls: 'aldia', text: 'Al día' };
+}
+
 function renderCuentas() {
   const m = state.month;
   const prefix = iso(m).slice(0, 7);
   const present = db.attendance.filter(a => a.date.startsWith(prefix) && a.status === 'present');
-  const absentCount = db.attendance.filter(a => a.date.startsWith(prefix) && a.status === 'absent').length;
-  const total = present.reduce((t, s) => t + s.price, 0);
+  const atendido = present.reduce((t, s) => t + s.price, 0);
+  const paymentsThisMonth = db.payments.filter(p => p.date.startsWith(prefix));
+  const cobrado = paymentsThisMonth.reduce((t, p) => t + p.amount, 0);
+  const totalOwed = db.patients.reduce((t, p) => t + Math.max(0, balanceOf(db, p.id)), 0);
 
   const perPatient = new Map();
   for (const s of present) {
@@ -821,8 +880,11 @@ function renderCuentas() {
     e.total += s.price;
     perPatient.set(s.patientId, e);
   }
-  const rows = [...perPatient.entries()]
-    .map(([id, e]) => ({ p: findPatient(db, id) || { name: 'Paciente eliminado' }, ...e }))
+  const involvedIds = new Set([...perPatient.keys(), ...db.patients.filter(p => p.active).map(p => p.id)]);
+  const rows = [...involvedIds]
+    .map(id => findPatient(db, id))
+    .filter(Boolean)
+    .map(p => ({ p, ...(perPatient.get(p.id) || { days: [], total: 0 }), balance: balanceOf(db, p.id) }))
     .sort((a, b) => byName(a.p, b.p));
 
   let html = `
@@ -831,17 +893,24 @@ function renderCuentas() {
       <h1 style="text-transform:capitalize">${MONTHS[m.getMonth()]}<small>${m.getFullYear()}</small></h1>
       <button class="arrow" data-act="month" data-step="1" aria-label="Mes siguiente">${NEXT}</button>
     </div>
-    <div class="big"><span class="num">${moneyFmt(total)}</span>
-      <div class="sub">${present.length} ${present.length === 1 ? 'sesión' : 'sesiones'}${absentCount ? `, ${absentCount} ${absentCount === 1 ? 'ausencia' : 'ausencias'}` : ''}</div></div>`;
+    <div class="cuentas-figures">
+      <div class="figure"><div class="figure-num">${moneyFmt(atendido)}</div><div class="figure-label">Atendido</div></div>
+      <div class="figure"><div class="figure-num">${moneyFmt(cobrado)}</div><div class="figure-label">Cobrado</div></div>
+    </div>
+    <div class="owed-total">Te deben <strong>${moneyFmt(totalOwed)}</strong></div>`;
 
   if (rows.length) {
-    html += '<ul class="list">' + rows.map(r => `<li class="row">
-      <span class="who"><span class="name">${esc(r.p.name)}</span>
-        <div class="sub">${r.days.length} ${r.days.length === 1 ? 'sesión' : 'sesiones'}: ${r.days.sort((a, b) => a - b).join(', ')}</div></span>
-      <span class="amount">${moneyFmt(r.total)}</span>
-    </li>`).join('') + '</ul>';
+    html += '<ul class="list">' + rows.map(r => {
+      const chip = balanceChip(r.balance);
+      return `<li><button class="row" data-act="patient-accounts" data-id="${r.p.id}">
+        <span class="dot" style="background:${r.p.color}"></span>
+        <span class="who"><span class="name">${esc(r.p.name)}</span>
+          <div class="sub">${r.days.length} ${r.days.length === 1 ? 'sesión' : 'sesiones'}${r.total ? ' este mes: ' + moneyFmt(r.total) : ' este mes'}</div></span>
+        <span class="balance-chip ${chip.cls}">${chip.text}</span>
+      </button></li>`;
+    }).join('') + '</ul>';
   } else {
-    html += '<div class="empty">No hay sesiones este mes.</div>';
+    html += '<div class="empty">No hay pacientes.</div>';
   }
   app.innerHTML = html;
 }
@@ -915,6 +984,11 @@ app.addEventListener('click', e => {
     save(); render();
   } else if (act === 'reprogramar') {
     openReschedule(id, date, el.dataset.time || '');
+  } else if (act === 'quick-pay') {
+    const amount = Number(el.dataset.amount) || 0;
+    if (amount > 0) { recordPayment(db, id, el.dataset.date, amount); save(); render(); }
+  } else if (act === 'patient-accounts') {
+    openAccountsSheet(id);
   } else if (act === 'extra') {
     const pid = document.getElementById('extra-patient').value;
     if (!pid) return;
@@ -1033,6 +1107,103 @@ rescheduleForm.addEventListener('submit', e => {
   if (!ISO_DATE_RE.test(toDate) || !HHMM_RE.test(toTime)) { toast('Fecha u hora inválida'); return; }
   rescheduleOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date, toDate, toTime);
   save(); reschedule.close(); render(); toast('Sesión reprogramada');
+});
+
+/* ---------- patient accounts sheet ---------- */
+const accountsSheet = document.getElementById('accounts-sheet');
+const paymentForm = document.getElementById('payment-form');
+let accountsPatientId = null;
+
+function renderAccountsHistory(patientId) {
+  const sessions = db.attendance
+    .filter(a => a.patientId === patientId && a.status === 'present')
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 10);
+  const payments = db.payments
+    .filter(p => p.patientId === patientId)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  let html = '<div class="field-title">Sesiones recientes</div>';
+  html += sessions.length
+    ? '<ul class="list small-list">' + sessions.map(a => `<li class="row">
+        <span class="who"><span class="name">${describeDate(a.date)}</span></span>
+        <span class="amount">${moneyFmt(a.price)}</span>
+      </li>`).join('') + '</ul>'
+    : '<div class="empty small">Sin sesiones</div>';
+
+  html += '<div class="field-title">Pagos</div>';
+  html += payments.length
+    ? '<ul class="list small-list">' + payments.map(p => `<li class="row">
+        <span class="who"><span class="name">${describeDate(p.date)}</span>${p.note ? `<div class="sub">${esc(p.note)}</div>` : ''}</span>
+        <span class="amount">${moneyFmt(p.amount)}</span>
+        <button class="icon-btn" data-act="delete-payment" data-id="${p.id}" aria-label="Eliminar pago">${XICON}</button>
+      </li>`).join('') + '</ul>'
+    : '<div class="empty small">Sin pagos</div>';
+
+  document.getElementById('accounts-history').innerHTML = html;
+}
+
+function openAccountsSheet(patientId) {
+  const p = findPatient(db, patientId);
+  if (!p) return;
+  accountsPatientId = patientId;
+  document.getElementById('accounts-title').textContent = p.name;
+
+  const balance = balanceOf(db, patientId);
+  const chip = balanceChip(balance);
+  const balEl = document.getElementById('accounts-balance');
+  balEl.textContent = chip.text;
+  balEl.className = 'accounts-balance ' + chip.cls;
+
+  paymentForm.elements.amount.value = balance > 0 ? balance : '';
+  paymentForm.elements.date.value = iso(new Date());
+  paymentForm.elements.note.value = '';
+
+  const lastSession = db.attendance
+    .filter(a => a.patientId === patientId && a.status === 'present')
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+  let quickHtml = '';
+  if (balance > 0) quickHtml += `<button type="button" class="btn small" data-quick="${balance}">Todo lo que debe</button>`;
+  if (lastSession && lastSession.price !== balance) {
+    quickHtml += `<button type="button" class="btn small" data-quick="${lastSession.price}">Última sesión (${moneyFmt(lastSession.price)})</button>`;
+  }
+  document.getElementById('quick-amounts').innerHTML = quickHtml;
+
+  renderAccountsHistory(patientId);
+  accountsSheet.showModal();
+}
+
+document.getElementById('quick-amounts').addEventListener('click', e => {
+  const b = e.target.closest('[data-quick]');
+  if (!b) return;
+  paymentForm.elements.amount.value = b.dataset.quick;
+});
+
+document.getElementById('accounts-close').onclick = () => accountsSheet.close();
+
+paymentForm.addEventListener('submit', e => {
+  e.preventDefault();
+  if (!accountsPatientId) return;
+  const amount = Math.round(Number(paymentForm.elements.amount.value));
+  const date = paymentForm.elements.date.value;
+  const note = paymentForm.elements.note.value.trim();
+  if (!(amount > 0) || !ISO_DATE_RE.test(date)) { toast('Datos inválidos'); return; }
+  recordPayment(db, accountsPatientId, date, amount, note || undefined);
+  save();
+  openAccountsSheet(accountsPatientId);
+  render();
+  toast('Pago registrado');
+});
+
+document.getElementById('accounts-history').addEventListener('click', e => {
+  const b = e.target.closest('[data-act="delete-payment"]');
+  if (!b || !accountsPatientId) return;
+  if (!confirm('¿Eliminar este pago?')) return;
+  deletePayment(db, b.dataset.id);
+  save();
+  openAccountsSheet(accountsPatientId);
+  render();
+  toast('Pago eliminado');
 });
 
 /* ---------- voice sheet ---------- */

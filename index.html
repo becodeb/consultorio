@@ -96,6 +96,26 @@
   </form>
 </dialog>
 
+<dialog id="accounts-sheet">
+  <div class="sheet-inner">
+    <h2 id="accounts-title"></h2>
+    <div class="accounts-balance" id="accounts-balance"></div>
+    <form id="payment-form">
+      <label>Monto
+        <input type="number" name="amount" inputmode="numeric" min="0" step="1" required>
+      </label>
+      <div class="quick-amounts" id="quick-amounts"></div>
+      <label>Fecha <input type="date" name="date" required></label>
+      <label>Nota (opcional) <input type="text" name="note" autocomplete="off"></label>
+      <button type="submit" class="btn primary wide">Registrar pago</button>
+    </form>
+    <div id="accounts-history"></div>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="accounts-close">Cerrar</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="voice-sheet">
   <div class="sheet-inner">
     <h2>Asistente por voz</h2>
