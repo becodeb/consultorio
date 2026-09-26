@@ -51,7 +51,7 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
 - [x] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
       action validation + apply + undo.
 - [x] T5 Visual polish across all views, bottom navigation.
-- [ ] T6 Playwright e2e + screenshots (390×844).
+- [x] T6 Playwright e2e + screenshots (390×844).
 
 Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
@@ -190,6 +190,62 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   legibility text, bottom nav/FAB never obscure unreachable content, dark mode legible
   (tightened the Ahora-card eyebrow color afterwards for low contrast in dark mode).
 
+- T6 (commit pending): `tools/e2e.mjs` starts `server.mjs` on a Node-assigned free port
+  (LLM env vars explicitly deleted for this run), drives system Chromium
+  (`executablePath:'/usr/bin/chromium'`, `--no-sandbox --disable-gpu`) via
+  `playwright-core` (resolved from `NODE_PATH` explicitly, since ESM does not honor
+  `NODE_PATH` for bare specifiers), and fixes the clock (`page.clock.install`) to Monday
+  2026-09-28 14:10 — inside Martina's 14:00 session window, so the Ahora card is always
+  exercised. Seed: 7 Argentine-named patients, Mon–Fri 09:00–19:00 (mostly afternoons,
+  two mornings), prices 15000–22000, ~3 past weeks of attendance for real Cuentas totals,
+  and one this-week move (Joaquín's Tuesday → today) for the "reprogramado" badge.
+
+  Five scenarios, all green:
+  - **v1 → v2 migration**: writes the v1 `{patients,sessions}` shape, reloads, asserts
+    `version:2`, a palette color + `since` were assigned, the legacy session became
+    `present` attendance, and the patient renders correctly in Pacientes.
+  - **Explicit Vino/No vino + Deshacer**: asserts a pre-marked row is green
+    (`.row.present`), marking "No vino" turns it red, "Deshacer" clears both classes
+    (proving the mark is undone explicitly, not silently toggled), then marking "Vino"
+    from the Ahora card turns it green.
+  - **reschedule_once via the sheet**: moves Sofía's Tuesday 16:00 to Thursday 18:30
+    ("Solo esta vez"); asserts she disappears from Tuesday's Hoy, appears on Thursday's
+    Hoy with the moved badge and dashed row, Semana renders a dashed block, Mes's
+    Thursday cell gains a dot, and — reading `db` directly — her `schedule` and the
+    change count/kind are exactly what a one-off move should produce (fixed schedule
+    untouched).
+  - **Cuentas frozen price**: reads the month total, changes a patient's price after she
+    was already marked present, re-reads the total — unchanged.
+  - **Voice text fallback**: mocks `POST /api/voice` via `page.route`, submits through
+    the always-available text input, asserts the action list/reply render and the db was
+    actually mutated, then asserts "Deshacer" restores the pre-batch snapshot.
+
+  `node --check app.js server.mjs tools/e2e.mjs` all pass (run from inside the script
+  too). Ran the full suite twice back to back — stable, no flakes — after fixing two real
+  issues it caught: (1) a v1→v2 migration was only ever applied in memory, never
+  persisted back to `localStorage`, so a reload before any mutation would silently
+  re-read the original v1 shape (fixed: `app.js` now calls `save()` once right after
+  `load()`); (2) one assertion raced the DOM update after clicking "Deshacer" — replaced
+  the fixed `waitForTimeout` with `page.waitForFunction` on the rendered "Deshecho" text,
+  and widened the other timeouts, since this Pi is shared and another session's Chromium
+  was independently running concurrently during this work (confirmed via `ps`, left
+  untouched).
+
+  Screenshots (390×844, deviceScaleFactor 2) written to `shots/` and inspected by hand:
+  `hoy.png` (Ahora card + one green + one red + one moved, all visible together after
+  reordering the seed's row times), `semana.png`, `mes.png`, `pacientes.png`,
+  `cuentas.png`, `voz.png` (sheet open, submitted text, reply, one done action, Deshacer),
+  `hoy-dark.png`. No overflow, truncation, or nav/FAB overlap in any of them; the Ahora
+  eyebrow's dark-mode contrast was tightened after review.
+
+  **Deployment**: stopped the `python3 -m http.server 8811` placeholder (killed by PID,
+  not by pattern), started `node server.mjs` detached (`setsid nohup … &`, disowned) on
+  `0.0.0.0:8811` with the OpenCode Go env wired in, logging to
+  `/tmp/consultorio-server.log`. Verified `curl http://127.0.0.1:8811/` → 200 and a live
+  `POST /api/voice` call answers correctly.
+
 ## Next step
 
-T6.
+None — T1–T6 all done. Possible follow-ups if the psicopedagoga wants them later: a
+patient search/filter for large caseloads, an "editable not needed" color override, and
+periodically renewing the OpenCode Go session header if that plan's quota changes.

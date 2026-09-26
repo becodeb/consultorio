@@ -344,6 +344,7 @@ const state = {
   editing: null,
 };
 let db = load();
+save(); // persist a v1->v2 migration immediately, so it never has to be redone/re-read as v1
 
 function load() {
   try {
