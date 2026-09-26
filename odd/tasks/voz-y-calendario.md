@@ -48,7 +48,7 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
 - [x] T2 Today view redesign: pre-filled list, Vino (green) / No vino (red) / Reprogramar,
       undo, "now" card, reschedule sheet.
 - [x] T3 Week calendar + month calendar views.
-- [ ] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
+- [x] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
       action validation + apply + undo.
 - [ ] T5 Visual polish across all views, bottom navigation.
 - [ ] T6 Playwright e2e + screenshots (390×844).
@@ -106,6 +106,53 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   screenshots at 390px show both grids fit without horizontal overflow (name truncation
   is intentionally tight — refined further in T5). `node --check app.js` passes.
 
+- T4 (commit pending): mic FAB opens a bottom `<dialog>` sheet that auto-starts
+  `SpeechRecognition` (`lang:'es-AR'`, `interimResults:true`) when available in a secure
+  context, showing a live transcript and auto-submitting on `onend`; a text input +
+  "Enviar" is always present as fallback (and the only path when speech is unsupported).
+  `buildVoiceContext(db)` sends today/weekday/now, next 14 + previous 7 days, active+
+  inactive patients, computed appointments for the current+next week, and this month's
+  totals. `server.mjs` (Node built-ins only) serves the static files (traversal blocked —
+  verified the WHATWG URL parser already collapses `..` before our path-containment check
+  even runs; `.git`/`odd/`/`.env*` explicitly blocked with 403) and proxies
+  `POST /api/voice` to an OpenAI-compatible `/chat/completions` endpoint (30s timeout,
+  200KB body cap, 30 req/min per-IP rate limit, `response_format:json_object` + defensive
+  fenced-code/first-object JSON extraction, 503 when unconfigured, API key never logged).
+  Client validates every action type from the schema (patient exists, `YYYY-MM-DD`/
+  `HH:MM` shapes, occurrence exists for reschedule/cancel) before applying any of them,
+  applies valid ones in one batch, snapshots `db` first for an explicit "Deshacer", and
+  lists invalid ones as "No hecho: <reason>". Added `README.md` and `.gitignore`
+  (`.env*`, `node_modules/`, `shots/`).
+
+  Checks: `node --check app.js server.mjs` pass. `curl`: static 200, traversal → 404 (URL
+  parser normalizes `..` before it reaches our code — no vulnerability), `.git`/`odd/` →
+  403, `/api/voice` without LLM env → 503, missing `text` → 400. Playwright/Chromium
+  (mocked `/api/voice` via `page.route`): sheet opens, text fallback submits, valid action
+  applied → row turns green in Hoy, "Deshacer" restores prior state (verified 0 present
+  rows after undo), invalid action → listed as "No hecho: paciente inexistente", no
+  console errors.
+
+  **Real LLM test** (OpenCode Go, `https://opencode.ai/zen/go/v1`, model
+  `deepseek-v4.1-flash`, session/user-agent headers via `LLM_EXTRA_HEADERS` per
+  `kodu-medicion/experimentos/razonamiento/proxy-go.mjs`), 9 calls against a realistic
+  4-patient context:
+
+  | # | Command | Result | Latency |
+  |---|---|---|---|
+  | 1 | "hoy vino Martina" | correct `mark_attendance` present, today | 4.05s |
+  | 2 | "Sofía no vino" | correct `mark_attendance` absent, correct patient | 4.62s |
+  | 3 | "vinieron Joaquín y Tomás" | correct, one `mark_attendance` present per patient | 3.74s |
+  | 4 | "esta semana Joaquín viene el jueves a las seis de la tarde en vez del martes" | **502** — upstream aborted at the 30s timeout | 30.0s |
+  | 4b | same command, retried | correct `reschedule_once`, fromDate = this week's Tue, toDate = this week's Thu, toTime 18:00 | 2.95s |
+  | 5 | "el lunes que viene Tomás no viene" | correct `cancel_once`, next Monday's date | 13.9s |
+  | 6 | "agregá a Lucía Gómez, quince mil, lunes y miércoles a las cinco" | correct `add_patient`, price 15000, Mon+Wed 17:00 | 2.39s |
+  | 7 | "a Martina subile a dieciocho mil" | correct `update_patient`, price 18000 | 1.82s |
+  | 8 | "¿cuánto llevo este mes?" | no action (correct), `reply` states the real month total/count | 1.75s |
+
+  8/9 calls correct on the first try (one transient timeout on the hardest case,
+  correct on immediate retry — treated as a provider hiccup, not a prompt defect).
+  Every produced action shape matched the schema and passed client-side validation.
+
 ## Next step
 
-T4.
+T5.

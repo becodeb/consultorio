@@ -62,6 +62,27 @@
   </form>
 </dialog>
 
+<dialog id="voice-sheet">
+  <div class="sheet-inner">
+    <h2>Asistente por voz</h2>
+    <button type="button" id="voice-mic-btn" class="voice-mic" aria-label="Escuchar / detener"></button>
+    <div id="voice-status" class="voice-status"></div>
+    <div id="voice-transcript" class="voice-transcript" aria-live="polite"></div>
+    <form id="voice-text-form">
+      <label>Escribí lo que querés hacer
+        <input type="text" id="voice-text-input" autocomplete="off" placeholder="hoy vino Martina">
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" id="voice-close">Cerrar</button>
+        <button type="submit" class="btn primary">Enviar</button>
+      </div>
+    </form>
+    <div id="voice-result" aria-live="polite"></div>
+  </div>
+</dialog>
+
+<button id="mic-fab" class="fab" aria-label="Asistente por voz" aria-haspopup="dialog"></button>
+
 <input type="file" id="import-file" accept="application/json" hidden>
 <div class="toast" id="toast" role="status"></div>
 

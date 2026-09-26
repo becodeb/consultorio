@@ -139,6 +139,147 @@ function findOccurrence(db, patientId, isoDate) {
   return appointmentsOn(db, isoDate).find(a => a.patientId === patientId) || null;
 }
 
+/** Builds the JSON context sent to /api/voice alongside the spoken/typed text. */
+function buildVoiceContext(db) {
+  const today = new Date();
+  const todayIso = iso(today);
+  const next14Days = [];
+  for (let i = 0; i < 14; i++) { const d = addDays(today, i); next14Days.push(`${iso(d)} ${DAYS[d.getDay()]}`); }
+  const prev7Days = [];
+  for (let i = 1; i <= 7; i++) { const d = addDays(today, -i); prev7Days.push(`${iso(d)} ${DAYS[d.getDay()]}`); }
+
+  const patients = db.patients.map(p => ({
+    id: p.id, name: p.name, price: p.price, schedule: p.schedule, active: p.active,
+  }));
+
+  const weekStart = mondayOf(today);
+  const rangeDates = [];
+  for (let i = 0; i < 14; i++) rangeDates.push(iso(addDays(weekStart, i)));
+  const appointments = rangeDates.flatMap(d =>
+    appointmentsOn(db, d).filter(a => findPatient(db, a.patientId)).map(a => ({
+      patientId: a.patientId, date: a.date, time: a.time, status: a.status,
+      moved: !!a.moved, extra: !!a.extra,
+    })));
+
+  const prefix = todayIso.slice(0, 7);
+  const present = db.attendance.filter(a => a.date.startsWith(prefix) && a.status === 'present');
+  const monthTotals = { month: prefix, total: present.reduce((t, s) => t + s.price, 0), sessions: present.length };
+
+  return {
+    today: todayIso, todayWeekday: DAYS[today.getDay()], now: nowHM(today),
+    next14Days, prev7Days, patients, appointments, monthTotals,
+  };
+}
+
+function describeDate(isoStr) {
+  const d = dateFromIso(isoStr);
+  return `${DAY_SHORT[d.getDay()]} ${d.getDate()}/${d.getMonth() + 1}`;
+}
+
+/** Returns an error string if the action is invalid, or null if it may be applied. */
+function validateVoiceAction(db, a) {
+  if (!a || typeof a !== 'object' || typeof a.type !== 'string') return 'acción inválida';
+  const scheduleOk = s => Array.isArray(s) && s.every(sl => sl && Number.isInteger(sl.day) && sl.day >= 0 && sl.day <= 6 && HHMM_RE.test(sl.time));
+  switch (a.type) {
+    case 'mark_attendance':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (!ISO_DATE_RE.test(a.date)) return 'fecha inválida';
+      if (a.status !== 'present' && a.status !== 'absent') return 'estado inválido';
+      return null;
+    case 'reschedule_once':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (!ISO_DATE_RE.test(a.fromDate) || !ISO_DATE_RE.test(a.toDate)) return 'fecha inválida';
+      if (!HHMM_RE.test(a.toTime)) return 'hora inválida';
+      if (!findOccurrence(db, a.patientId, a.fromDate)) return 'no hay sesión en esa fecha';
+      return null;
+    case 'cancel_once':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (!ISO_DATE_RE.test(a.date)) return 'fecha inválida';
+      if (!findOccurrence(db, a.patientId, a.date)) return 'no hay sesión en esa fecha';
+      return null;
+    case 'add_once':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (!ISO_DATE_RE.test(a.date)) return 'fecha inválida';
+      if (!HHMM_RE.test(a.time)) return 'hora inválida';
+      return null;
+    case 'add_patient':
+      if (typeof a.name !== 'string' || !a.name.trim()) return 'falta el nombre';
+      if (!(Number(a.price) >= 0)) return 'precio inválido';
+      if (a.schedule !== undefined && !scheduleOk(a.schedule)) return 'horario inválido';
+      return null;
+    case 'update_patient':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (a.price !== undefined && !(Number(a.price) >= 0)) return 'precio inválido';
+      if (a.schedule !== undefined && !scheduleOk(a.schedule)) return 'horario inválido';
+      if (a.name !== undefined && (typeof a.name !== 'string' || !a.name.trim())) return 'nombre inválido';
+      return null;
+    case 'deactivate_patient':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      return null;
+    default:
+      return 'tipo de acción desconocido';
+  }
+}
+
+function describeVoiceAction(db, a) {
+  const p = findPatient(db, a.patientId);
+  const name = p ? p.name : '';
+  switch (a.type) {
+    case 'mark_attendance':
+      return `${name}: ${a.status === 'present' ? 'vino' : 'no vino'} el ${describeDate(a.date)}`;
+    case 'reschedule_once':
+      return `${name}: pasa del ${describeDate(a.fromDate)} al ${describeDate(a.toDate)} ${a.toTime} (solo esta vez)`;
+    case 'cancel_once':
+      return `${name}: sesión del ${describeDate(a.date)} cancelada`;
+    case 'add_once':
+      return `${name}: sesión extra el ${describeDate(a.date)} a las ${a.time}`;
+    case 'add_patient':
+      return `Paciente agregado: ${a.name}`;
+    case 'update_patient':
+      return `${name}: datos actualizados`;
+    case 'deactivate_patient':
+      return `${name}: dado de baja`;
+    default:
+      return '';
+  }
+}
+
+/** Applies one already-validated voice action to `db` in place. */
+function applyVoiceAction(db, a) {
+  switch (a.type) {
+    case 'mark_attendance': {
+      const appt = findOccurrence(db, a.patientId, a.date);
+      markAttendance(db, a.patientId, a.date, appt ? appt.time : '', a.status);
+      return;
+    }
+    case 'reschedule_once':
+      rescheduleOccurrence(db, a.patientId, a.fromDate, a.toDate, a.toTime);
+      return;
+    case 'cancel_once':
+      cancelOccurrence(db, a.patientId, a.date);
+      return;
+    case 'add_once':
+      addExtraOccurrence(db, a.patientId, a.date, a.time);
+      return;
+    case 'add_patient':
+      db.patients.push({
+        id: uid(), name: a.name.trim(), price: Math.round(Number(a.price)),
+        schedule: a.schedule || [], active: true, color: nextColor(db), since: iso(new Date()),
+      });
+      return;
+    case 'update_patient': {
+      const p = findPatient(db, a.patientId);
+      if (a.name !== undefined) p.name = a.name.trim();
+      if (a.price !== undefined) p.price = Math.round(Number(a.price));
+      if (a.schedule !== undefined) p.schedule = a.schedule;
+      return;
+    }
+    case 'deactivate_patient':
+      findPatient(db, a.patientId).active = false;
+      return;
+  }
+}
+
 /** Moves one occurrence to another date/time. Fixed weekly schedule is never touched. */
 function rescheduleOccurrence(db, patientId, fromDate, toDate, toTime) {
   const appt = findOccurrence(db, patientId, fromDate);
@@ -711,6 +852,137 @@ rescheduleForm.addEventListener('submit', e => {
   if (!ISO_DATE_RE.test(toDate) || !HHMM_RE.test(toTime)) { toast('Fecha u hora inválida'); return; }
   rescheduleOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date, toDate, toTime);
   save(); reschedule.close(); render(); toast('Sesión reprogramada');
+});
+
+/* ---------- voice sheet ---------- */
+const voiceSheet = document.getElementById('voice-sheet');
+const voiceMicBtn = document.getElementById('voice-mic-btn');
+const voiceStatusEl = document.getElementById('voice-status');
+const voiceTranscriptEl = document.getElementById('voice-transcript');
+const voiceTextForm = document.getElementById('voice-text-form');
+const voiceTextInput = document.getElementById('voice-text-input');
+const voiceResultEl = document.getElementById('voice-result');
+
+let recognition = null;
+let recognizing = false;
+let undoSnapshot = null;
+
+function speechSupported() {
+  return !!(window.isSecureContext && (window.SpeechRecognition || window.webkitSpeechRecognition));
+}
+
+function stopListening() {
+  if (recognition && recognizing) { try { recognition.stop(); } catch {} }
+}
+
+function startListening() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'es-AR';
+  recognition.interimResults = true;
+  recognition.continuous = false;
+  recognizing = true;
+  voiceMicBtn.classList.add('listening');
+  voiceStatusEl.textContent = 'Escuchando…';
+  recognition.onresult = e => {
+    let text = '';
+    for (let i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
+    voiceTranscriptEl.textContent = text;
+  };
+  recognition.onerror = () => {
+    voiceStatusEl.textContent = 'No se entendió. Probá de nuevo o escribí abajo.';
+  };
+  recognition.onend = () => {
+    recognizing = false;
+    voiceMicBtn.classList.remove('listening');
+    voiceStatusEl.textContent = '';
+    const text = voiceTranscriptEl.textContent.trim();
+    if (text) submitVoiceText(text);
+  };
+  try { recognition.start(); }
+  catch { recognizing = false; voiceMicBtn.classList.remove('listening'); voiceStatusEl.textContent = 'No se pudo iniciar el micrófono.'; }
+}
+
+function openVoiceSheet() {
+  voiceResultEl.innerHTML = '';
+  voiceTranscriptEl.textContent = '';
+  voiceTextInput.value = '';
+  voiceStatusEl.textContent = '';
+  voiceSheet.showModal();
+  if (speechSupported()) startListening();
+  else voiceStatusEl.textContent = 'Sin reconocimiento de voz en este navegador: escribí abajo.';
+}
+
+async function submitVoiceText(text) {
+  stopListening();
+  voiceResultEl.innerHTML = '<p class="muted">Pensando…</p>';
+  const context = buildVoiceContext(db);
+  let data;
+  try {
+    const res = await fetch('/api/voice', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, context }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      voiceResultEl.innerHTML = `<p class="voice-error">${esc(body.error || 'No se pudo conectar con el asistente.')}</p>`;
+      return;
+    }
+    data = body;
+  } catch {
+    voiceResultEl.innerHTML = '<p class="voice-error">No se pudo conectar con el asistente.</p>';
+    return;
+  }
+  applyVoiceResult(data);
+}
+
+function applyVoiceResult(data) {
+  const actions = Array.isArray(data.actions) ? data.actions : [];
+  const reply = typeof data.reply === 'string' ? data.reply : '';
+  const done = [];
+  const failed = [];
+  const snapshot = JSON.parse(JSON.stringify(db));
+  for (const a of actions) {
+    const err = validateVoiceAction(db, a);
+    if (err) { failed.push(err); continue; }
+    done.push(describeVoiceAction(db, a));
+    applyVoiceAction(db, a);
+  }
+  if (done.length) { undoSnapshot = snapshot; save(); render(); }
+
+  let html = '';
+  if (reply) html += `<p class="voice-reply">${esc(reply)}</p>`;
+  if (done.length) {
+    html += '<ul class="voice-done">' + done.map(d => `<li>${esc(d)}</li>`).join('') + '</ul>';
+    html += '<button type="button" class="btn" id="voice-undo">Deshacer</button>';
+  }
+  if (failed.length) {
+    html += '<ul class="voice-invalid">' + failed.map(e => `<li>No hecho: ${esc(e)}</li>`).join('') + '</ul>';
+  }
+  if (!done.length && !failed.length && !reply) html = '<p class="muted">No entendí ninguna acción.</p>';
+  voiceResultEl.innerHTML = html;
+  const undoBtn = document.getElementById('voice-undo');
+  if (undoBtn) undoBtn.onclick = () => {
+    db = undoSnapshot; undoSnapshot = null; save(); render();
+    voiceResultEl.innerHTML = '<p class="muted">Deshecho.</p>';
+  };
+}
+
+document.getElementById('mic-fab').addEventListener('click', openVoiceSheet);
+document.getElementById('voice-close').addEventListener('click', () => { stopListening(); voiceSheet.close(); });
+voiceSheet.addEventListener('close', stopListening);
+voiceMicBtn.addEventListener('click', () => {
+  if (recognizing) stopListening();
+  else if (speechSupported()) startListening();
+});
+voiceTextForm.addEventListener('submit', e => {
+  e.preventDefault();
+  const text = voiceTextInput.value.trim();
+  if (!text) return;
+  voiceTextInput.value = '';
+  voiceTranscriptEl.textContent = text;
+  submitVoiceText(text);
 });
 
 render();
