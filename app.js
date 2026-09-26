@@ -645,7 +645,7 @@ function nowCardHtml() {
       <button class="btn-mark big vino" data-act="mark" data-status="present" data-id="${p.id}" data-time="${info.time}">${CHECK}Vino</button>
       <button class="btn-mark big novino" data-act="mark" data-status="absent" data-id="${p.id}" data-time="${info.time}">${XICON}No vino</button>
     </div>
-    <button class="btn ghost" data-act="reprogramar" data-id="${p.id}" data-time="${info.time}">Reprogramar</button>
+    <button class="now-reprogramar" data-act="reprogramar" data-id="${p.id}" data-time="${info.time}">Reprogramar</button>
   </div>`;
 }
 
@@ -736,6 +736,44 @@ setInterval(() => {
   if (slot) slot.innerHTML = nowCardHtml();
 }, 30000);
 
+/** Assigns a side-by-side lane to each appointment so overlapping ones never cover each
+ *  other: mutually-overlapping appointments are grouped, then packed greedily into the
+ *  fewest lanes (Google-Calendar-style), and every item in a group shares that group's
+ *  lane count for its column width. */
+function layoutDayColumn(appts, durationMin) {
+  const items = appts
+    .map(a => ({ a, start: timeToMinutes(a.time), end: timeToMinutes(a.time) + durationMin }))
+    .sort((x, y) => x.start - y.start || x.end - y.end);
+
+  const groups = [];
+  let current = [];
+  let currentEnd = -Infinity;
+  for (const it of items) {
+    if (current.length && it.start >= currentEnd) {
+      groups.push(current);
+      current = [];
+      currentEnd = -Infinity;
+    }
+    current.push(it);
+    currentEnd = Math.max(currentEnd, it.end);
+  }
+  if (current.length) groups.push(current);
+
+  const results = [];
+  for (const group of groups) {
+    const laneEnds = []; // laneEnds[i] = end time of the last item placed in lane i
+    for (const it of group) {
+      let lane = laneEnds.findIndex(end => it.start >= end);
+      if (lane === -1) { lane = laneEnds.length; laneEnds.push(it.end); }
+      else laneEnds[lane] = it.end;
+      it.lane = lane;
+    }
+    const laneCount = laneEnds.length;
+    for (const it of group) results.push(Object.assign(it, { laneCount }));
+  }
+  return results;
+}
+
 function renderSemana() {
   const monday = state.week;
   const days = [0, 1, 2, 3, 4, 5].map(i => addDays(monday, i));
@@ -777,12 +815,14 @@ function renderSemana() {
     </div>
     ${days.map((d, i) => `<div class="week-col" style="height:${totalMin}px">
       ${hours.map(m => `<div class="hour-line" style="top:${m - minMin}px"></div>`).join('')}
-      ${perDay[i].map(a => {
+      ${layoutDayColumn(perDay[i], sessionMin).map(({ a, lane, laneCount }) => {
         const p = findPatient(db, a.patientId);
         const top = timeToMinutes(a.time) - minMin;
         const cls = a.status === 'present' ? 'present' : a.status === 'absent' ? 'absent' : '';
+        const widthPct = 100 / laneCount;
+        const leftPct = lane * widthPct;
         return `<button class="week-block ${cls} ${a.moved ? 'moved' : ''}" data-act="openday" data-date="${iso(d)}"
-          style="top:${top}px;height:${sessionMin - 2}px;background:color-mix(in srgb, ${p.color} 22%, var(--surface));border-color:${p.color}"
+          style="top:${top}px;height:${sessionMin - 2}px;left:calc(${leftPct}% + 1px);width:calc(${widthPct}% - 2px);background:color-mix(in srgb, ${p.color} 22%, var(--surface));border-color:${p.color}"
           aria-label="${esc(p.name)} ${a.time}">${esc(p.name.split(' ')[0])}</button>`;
       }).join('')}
     </div>`).join('')}

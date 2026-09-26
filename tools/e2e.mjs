@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * End-to-end checks for the Consultorio app: starts server.mjs on an ephemeral port
- * (with the LLM env unset), drives Chromium via Playwright with a fixed clock, and
- * takes the required 390x844 screenshots into shots/.
+ * End-to-end checks for the Consultorio app: starts server.mjs on an ephemeral port with
+ * a temp DATA_DIR and INSECURE_COOKIES=1, drives Chromium via Playwright with a fixed
+ * clock, and takes the required 390x844 screenshots into shots/.
  *
  *   NODE_PATH=/tmp/pw/node_modules node tools/e2e.mjs
  */
@@ -10,6 +10,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import net from 'node:net';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +33,9 @@ function addDays(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDat
 // 14:10 falls inside Martina's 14:00-14:45 session window, so the Ahora card is exercised.
 const ANCHOR = new Date(2026, 8, 28, 14, 10, 0);
 const ANCHOR_ISO = iso(ANCHOR);
+
+let emailCounter = 0;
+function nextEmail(prefix) { return `${prefix}-${Date.now()}-${emailCounter++}@example.com`; }
 
 /* ---------- realistic seed data (7 patients, Mon-Fri afternoons + a couple mornings) --- */
 function buildSeed() {
@@ -84,7 +88,12 @@ function buildSeed() {
     }
   }
 
-  return { version: 2, patients, changes, attendance, settings: { sessionMinutes: 45 } };
+  // Bautista already paid one of his three past sessions — a partial balance, not just 0 or "owes everything".
+  const payments = [
+    { id: 'pay1', patientId: 'p7', date: iso(addDays(ANCHOR, -3)), amount: 16000 },
+  ];
+
+  return { version: 2, patients, changes, attendance, payments, settings: { sessionMinutes: 45 } };
 }
 
 /* ---------- infra: free port, spawn server.mjs, wait for it ---------- */
@@ -126,7 +135,7 @@ async function check(name, fn) {
 function assertTrue(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
 function assertEqual(a, b, msg) { if (a !== b) throw new Error(`${msg || 'not equal'}: ${JSON.stringify(a)} !== ${JSON.stringify(b)}`); }
 
-/* ---------- page helpers ---------- */
+/* ---------- page + auth helpers ---------- */
 async function freshPage(browser, { dark = false } = {}) {
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -138,15 +147,43 @@ async function freshPage(browser, { dark = false } = {}) {
   return { context, page };
 }
 
-async function seed(page, origin, db) {
+async function signup(page, origin, email, password = 'password123') {
   await page.goto(origin);
-  await page.evaluate(json => localStorage.setItem('consultorio.v1', json), JSON.stringify(db));
-  await page.reload();
-  await page.waitForSelector('nav.tabs');
+  await page.waitForSelector('#auth-view:not([hidden])');
+  await page.click('#auth-toggle'); // default mode is "login"; switch to "signup"
+  await page.fill('#auth-form [name="email"]', email);
+  await page.fill('#auth-form [name="password"]', password);
+  await page.click('#auth-form button[type="submit"]');
+  await page.waitForSelector('nav.tabs:not([hidden])');
 }
 
-async function readDb(page) {
-  return page.evaluate(() => JSON.parse(localStorage.getItem('consultorio.v1')));
+async function login(page, origin, email, password = 'password123') {
+  await page.goto(origin);
+  await page.waitForSelector('#auth-view:not([hidden])');
+  await page.fill('#auth-form [name="email"]', email);
+  await page.fill('#auth-form [name="password"]', password);
+  await page.click('#auth-form button[type="submit"]');
+  await page.waitForSelector('nav.tabs:not([hidden])');
+}
+
+/** Writes `db` straight to the account's server doc (bypassing the UI) and reloads so the
+ *  page's in-memory docVersion catches up with the real server version. */
+async function seedServer(page, db) {
+  const result = await page.evaluate(async data => {
+    const cur = await fetch('/api/data').then(r => r.json());
+    const res = await fetch('/api/data', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data, baseVersion: cur.version }),
+    });
+    return { status: res.status, body: await res.json() };
+  }, db);
+  if (result.status !== 200) throw new Error(`seedServer PUT failed: ${result.status} ${JSON.stringify(result.body)}`);
+  await page.reload();
+  await page.waitForSelector('nav.tabs:not([hidden])');
+}
+
+async function readServerData(page) {
+  return page.evaluate(() => fetch('/api/data').then(r => r.json()));
 }
 
 async function goToView(page, view) {
@@ -154,49 +191,193 @@ async function goToView(page, view) {
   await page.waitForTimeout(180);
 }
 
-/* ---------- scenarios ---------- */
-async function scenarioMigration(browser, origin) {
+async function assertClass(locator, cls, msg) {
+  const c = await locator.getAttribute('class');
+  assertTrue(!!c && c.split(/\s+/).includes(cls), `${msg} (class was "${c}")`);
+}
+
+/* ---------- scenarios: accounts + sync (phase 2) ---------- */
+
+/** Covers both "v1 localStorage data loads without loss" (phase 1) and "import of
+ *  pre-existing local data on first login" (phase 2) — first login IS the migration path
+ *  now, so this one scenario exercises both requirements honestly rather than faking two. */
+async function scenarioImportOnFirstLogin(browser, origin) {
   const { context, page } = await freshPage(browser);
   try {
+    const email = nextEmail('import');
     const v1 = {
-      patients: [
-        { id: 'legacy1', name: 'Martina López', price: 15000, schedule: [{ day: ANCHOR.getDay(), time: '14:00' }], active: true },
-      ],
-      sessions: [
-        { id: 's1', patientId: 'legacy1', date: iso(addDays(ANCHOR, -14)), price: 15000 },
-      ],
+      patients: [{ id: 'legacy1', name: 'Martina López', price: 15000, schedule: [{ day: ANCHOR.getDay(), time: '14:00' }], active: true }],
+      sessions: [{ id: 's1', patientId: 'legacy1', date: iso(addDays(ANCHOR, -14)), price: 15000 }],
     };
     await page.goto(origin);
     await page.evaluate(json => localStorage.setItem('consultorio.v1', json), JSON.stringify(v1));
-    await page.reload();
-    await page.waitForSelector('nav.tabs');
-
-    const migrated = await readDb(page);
-    assertEqual(migrated.version, 2, 'migrated db should be version 2');
-    assertEqual(migrated.patients.length, 1, 'migrated patient count');
-    assertTrue(!!migrated.patients[0].color, 'migrated patient should get a palette color');
-    assertTrue(!!migrated.patients[0].since, 'migrated patient should get a since date');
-    assertEqual(migrated.attendance.length, 1, 'migrated attendance count');
-    assertEqual(migrated.attendance[0].status, 'present', 'legacy session becomes present attendance');
+    await signup(page, origin, email);
+    await page.waitForTimeout(700); // let the post-signup import-and-push settle
 
     await goToView(page, 'pacientes');
-    const nameVisible = await page.locator('.row .name', { hasText: 'Martina López' }).count();
-    assertTrue(nameVisible > 0, 'migrated patient should be visible in Pacientes');
+    assertTrue(await page.locator('.row .name', { hasText: 'Martina López' }).count() > 0,
+      'pre-existing v1 data should be visible right after first login');
+
+    const server = await readServerData(page);
+    assertEqual(server.data.version, 2, 'imported db must be v2 on the server');
+    assertTrue(server.data.patients.some(p => p.name === 'Martina López'), 'imported patient must reach the server, not just a local cache');
+    assertTrue(!!server.data.patients[0].color, 'migrated patient should get a palette color');
+    assertEqual(server.data.attendance.length, 1, 'migrated attendance count');
+    assertEqual(server.data.attendance[0].status, 'present', 'legacy session becomes present attendance');
   } finally {
     await context.close();
   }
 }
 
+async function scenarioAuthPersistence(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('persist');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    // A second page in the SAME browser context shares the session cookie.
+    const page2 = await context.newPage();
+    await page2.goto(origin);
+    await page2.waitForTimeout(400);
+    assertTrue(await page2.locator('#auth-view').isHidden(), 'a second page sharing the cookie should already be authenticated');
+    await page2.click('nav.tabs button[data-view="pacientes"]');
+    await page2.waitForTimeout(180);
+    const html = await page2.locator('#app').innerHTML();
+    assertTrue(html.includes('Martina López'), 'the second page must load the same server-backed data');
+    await page2.close();
+  } finally {
+    await context.close();
+  }
+}
+
+async function scenarioSyncReachesServer(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('sync');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+    const before = await readServerData(page);
+
+    await goToView(page, 'hoy');
+    const undoBtn = page.locator('[data-act="undo"]').first();
+    if (await undoBtn.count()) await undoBtn.click();
+    else await page.locator('[data-act="mark"][data-status="present"]').first().click();
+    await page.waitForTimeout(900); // 500ms debounce + margin
+
+    const after = await readServerData(page);
+    assertTrue(after.version > before.version, 'a local mutation must reach the server as a new doc version');
+  } finally {
+    await context.close();
+  }
+}
+
+async function scenario409Conflict(browser, origin) {
+  const email = nextEmail('conflict');
+  const { context: ctxA, page: pageA } = await freshPage(browser);
+  const { context: ctxB, page: pageB } = await freshPage(browser);
+  try {
+    await signup(pageA, origin, email);
+    await seedServer(pageA, buildSeed());
+
+    await login(pageB, origin, email);
+    await pageB.waitForTimeout(300);
+
+    // Device B writes behind device A's back.
+    const bumpResult = await pageB.evaluate(async () => {
+      const cur = await fetch('/api/data').then(r => r.json());
+      cur.data.settings.sessionMinutes = 99;
+      const res = await fetch('/api/data', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data: cur.data, baseVersion: cur.version }) });
+      return res.status;
+    });
+    assertEqual(bumpResult, 200, 'device B\'s own write should succeed');
+
+    // Device A, still holding the old version, makes its own edit.
+    await goToView(pageA, 'pacientes');
+    await pageA.evaluate(() => {
+      const input = document.getElementById('session-minutes');
+      input.value = '30';
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await pageA.waitForFunction(() => (document.getElementById('toast')?.textContent || '').includes('actualizó'), null, { timeout: 5000 });
+
+    const minutesOnA = await pageA.evaluate(() => Number(document.getElementById('session-minutes').value));
+    assertEqual(minutesOnA, 99, "device A must adopt device B's server value after a 409, not keep its own stale edit");
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+}
+
+async function scenarioPayments(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('payments');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    await goToView(page, 'cuentas');
+    const debtRow = page.locator('button[data-act="patient-accounts"]').filter({ has: page.locator('.balance-chip.debe') }).first();
+    assertTrue(await debtRow.count() > 0, 'the seed should include at least one patient who owes money');
+    await debtRow.click();
+    await page.waitForSelector('#accounts-sheet[open]');
+
+    const prefilled = await page.locator('#payment-form [name="amount"]').inputValue();
+    assertTrue(Number(prefilled) > 0, 'the payment amount should be prefilled with the owed balance');
+
+    await page.fill('#payment-form [name="amount"]', '1');
+    await page.click('[data-quick]:has-text("Todo lo que debe")');
+    const restored = await page.locator('#payment-form [name="amount"]').inputValue();
+    assertEqual(restored, prefilled, '"Todo lo que debe" must restore the full owed amount');
+
+    await page.click('#payment-form button[type="submit"]');
+    await page.waitForFunction(() => (document.getElementById('accounts-balance')?.textContent || '').includes('Al día'));
+    await page.click('#accounts-close');
+
+    // Hoy: the subtle "Pagó" quick action on an already-present row.
+    await goToView(page, 'hoy');
+    const payBtn = page.locator('[data-act="quick-pay"]').first();
+    assertTrue(await payBtn.count() > 0, 'a present row should offer the Pagó quick action');
+    await payBtn.click();
+    await page.waitForTimeout(180);
+    assertTrue(await page.locator('.paid-tag').count() > 0, 'Pagó must turn into a Pagado tag once recorded');
+
+    // Voice: record_payment with amount:null resolves to "everything owed".
+    await page.route('**/api/voice', async route => {
+      const body = route.request().postDataJSON();
+      const target = body.context.patients.find(p => p.balance > 0) || body.context.patients[0];
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          actions: [{ type: 'record_payment', patientId: target.id, amount: null, date: body.context.today }],
+          reply: 'Listo, registré el pago.',
+        }),
+      });
+    });
+    await page.click('#mic-fab');
+    await page.waitForSelector('#voice-sheet[open]');
+    await page.fill('#voice-text-input', 'pagó todo');
+    await page.click('#voice-text-form button[type="submit"]');
+    await page.waitForFunction(() => (document.querySelector('#voice-result')?.innerHTML || '').includes('voice-done'));
+    const resultHtml = await page.locator('#voice-result').innerHTML();
+    assertTrue(resultHtml.includes('pagó'), 'the record_payment result should be described in the done list');
+  } finally {
+    await context.close();
+  }
+}
+
+/* ---------- scenarios: carried over from phase 1, now behind auth ---------- */
+
 async function scenarioAttendanceAndUndo(browser, origin) {
   const { context, page } = await freshPage(browser);
   try {
-    await seed(page, origin, buildSeed());
+    const email = nextEmail('attendance');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
 
-    // Lucía (09:00) is already present -> should render green.
     const luciaRow = page.locator('li.row.appt', { hasText: 'Lucía Gómez' });
     await assertClass(luciaRow, 'present', 'Lucía should start present (green)');
 
-    // Mark Martina (14:00, the Ahora card) as "No vino" from her row, then undo explicitly.
     const martinaRow = page.locator('li.row.appt', { hasText: 'Martina López' }).first();
     await martinaRow.locator('[data-act="mark"][data-status="absent"]').click();
     await page.waitForTimeout(180);
@@ -209,7 +390,6 @@ async function scenarioAttendanceAndUndo(browser, origin) {
     const cls = await martinaRow.getAttribute('class');
     assertTrue(!cls.includes('present') && !cls.includes('absent'), 'Deshacer must explicitly clear the mark (no silent toggle)');
 
-    // Now mark her present via the big Ahora-card buttons.
     const nowCard = page.locator('.now-card');
     assertTrue(await nowCard.count() === 1, 'Ahora card should be showing for Martina at 14:10');
     await nowCard.locator('[data-act="mark"][data-status="present"]').click();
@@ -220,21 +400,15 @@ async function scenarioAttendanceAndUndo(browser, origin) {
   }
 }
 
-async function assertClass(locator, cls, msg) {
-  const c = await locator.getAttribute('class');
-  assertTrue(!!c && c.split(/\s+/).includes(cls), `${msg} (class was "${c}")`);
-}
-
 async function scenarioReschedule(browser, origin) {
   const { context, page } = await freshPage(browser);
   try {
-    await seed(page, origin, buildSeed());
+    const email = nextEmail('reschedule');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
 
-    const tuesday = addDays(ANCHOR, 1);
     const thursday = addDays(ANCHOR, 3);
-    const nextTuesday = addDays(ANCHOR, 8);
 
-    // Go to Tuesday (Sofía's normal 16:00) and reschedule her to Thursday 18:30, once.
     await page.click('[data-act="day"][data-step="1"]');
     await page.waitForTimeout(180);
     let sofiaRow = page.locator('li.row.appt', { hasText: 'Sofía Díaz' });
@@ -247,11 +421,9 @@ async function scenarioReschedule(browser, origin) {
     await page.click('#reschedule-confirm');
     await page.waitForTimeout(220);
 
-    // Gone from Tuesday.
     sofiaRow = page.locator('li.row.appt', { hasText: 'Sofía Díaz' });
     assertTrue(await sofiaRow.count() === 0, 'Sofía must disappear from the original Tuesday');
 
-    // Present on Thursday with the moved badge, in Hoy.
     await page.click('[data-act="day"][data-step="1"]'); // Tue -> Wed
     await page.click('[data-act="day"][data-step="1"]'); // Wed -> Thu
     await page.waitForTimeout(180);
@@ -260,29 +432,22 @@ async function scenarioReschedule(browser, origin) {
     assertTrue((await movedRow.getAttribute('class')).includes('moved'), 'Thursday row should carry the moved marker');
     assertTrue(await movedRow.locator('.moved-badge').count() === 1, 'Thursday row should show the reprogramado badge');
 
-    // Present in Semana too (Thursday column, not Tuesday).
     await goToView(page, 'semana');
     const weekHtml = await page.locator('.week-grid').innerHTML();
     assertTrue(weekHtml.includes('Sofía') || weekHtml.includes('Sof'), 'Semana should render a block for Sofía');
-    const movedBlocks = await page.locator('.week-block.moved').count();
-    assertTrue(movedBlocks >= 1, 'Semana should render the moved block as dashed');
+    assertTrue(await page.locator('.week-block.moved').count() >= 1, 'Semana should render the moved block as dashed');
 
-    // Present in Mes: Thursday's cell should have a dot, and this week's Tuesday should not
-    // have lost its other appointments (only Sofía's occurrence moved away from it).
     await goToView(page, 'mes');
-    const thuCell = page.locator(`.month-cell[data-date="${iso(thursday)}"] .dot`);
-    assertTrue(await thuCell.count() >= 1, 'Mes should show at least one dot on the target Thursday');
+    assertTrue(await page.locator(`.month-cell[data-date="${iso(thursday)}"] .dot`).count() >= 1, 'Mes should show at least one dot on the target Thursday');
 
-    // Fixed weekly schedule must be untouched: next Tuesday she is back to her normal 16:00.
-    const db = await readDb(page);
-    const sofia = db.patients.find(p => p.name === 'Sofía Díaz');
+    const server = await readServerData(page);
+    const sofia = server.data.patients.find(p => p.name === 'Sofía Díaz');
     assertEqual(sofia.schedule.length, 1, 'schedule length unchanged');
     assertEqual(sofia.schedule[0].day, 2, 'schedule weekday unchanged');
     assertEqual(sofia.schedule[0].time, '16:00', 'schedule time unchanged');
-    const movedOnly = db.changes.filter(c => c.patientId === sofia.id);
+    const movedOnly = server.data.changes.filter(c => c.patientId === sofia.id);
     assertEqual(movedOnly.length, 1, 'exactly one change recorded for Sofía');
     assertEqual(movedOnly[0].kind, 'move', 'the change must be a move, not a schedule edit');
-    void nextTuesday; // (schedule-based, no attendance needed for this check)
   } finally {
     await context.close();
   }
@@ -291,13 +456,13 @@ async function scenarioReschedule(browser, origin) {
 async function scenarioCuentasFrozenPrice(browser, origin) {
   const { context, page } = await freshPage(browser);
   try {
-    const db = buildSeed();
-    await seed(page, origin, db);
+    const email = nextEmail('frozen');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
 
     await goToView(page, 'cuentas');
-    const totalBefore = await page.locator('.big .num').innerText();
+    const totalBefore = await page.locator('.figure-num').first().innerText();
 
-    // Change Martina's price after she was already marked present this month.
     await goToView(page, 'pacientes');
     await page.locator('button.row', { hasText: 'Martina López' }).click();
     await page.waitForSelector('dialog#editor[open]');
@@ -306,8 +471,8 @@ async function scenarioCuentasFrozenPrice(browser, origin) {
     await page.waitForTimeout(180);
 
     await goToView(page, 'cuentas');
-    const totalAfter = await page.locator('.big .num').innerText();
-    assertEqual(totalAfter, totalBefore, 'Cuentas total must not change when a price changes after marking (frozen price)');
+    const totalAfter = await page.locator('.figure-num').first().innerText();
+    assertEqual(totalAfter, totalBefore, 'Cuentas "Atendido" must not change when a price changes after marking (frozen price)');
   } finally {
     await context.close();
   }
@@ -316,14 +481,15 @@ async function scenarioCuentasFrozenPrice(browser, origin) {
 async function scenarioVoiceTextFallback(browser, origin) {
   const { context, page } = await freshPage(browser);
   try {
-    await seed(page, origin, buildSeed());
+    const email = nextEmail('voice');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
 
     await page.route('**/api/voice', async route => {
       const body = route.request().postDataJSON();
-      const target = body.context.patients.find(p => p.name === 'Sofía Díaz');
+      const target = body.context.patients.find(p => p.name.startsWith('Sofía'));
       await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
+        status: 200, contentType: 'application/json',
         body: JSON.stringify({
           actions: [{ type: 'mark_attendance', patientId: target.id, date: body.context.today, status: 'present' }],
           reply: 'Listo, marqué a Sofía como presente hoy.',
@@ -335,22 +501,25 @@ async function scenarioVoiceTextFallback(browser, origin) {
     await page.waitForSelector('#voice-sheet[open]');
     await page.fill('#voice-text-input', 'hoy vino Sofía');
     await page.click('#voice-text-form button[type="submit"]');
-    await page.waitForTimeout(400);
+    await page.waitForFunction(() => (document.querySelector('#voice-result')?.innerHTML || '').includes('voice-done'));
 
     const resultHtml = await page.locator('#voice-result').innerHTML();
     assertTrue(resultHtml.includes('voice-done'), 'a valid action should be listed as done');
     assertTrue(await page.locator('#voice-undo').count() === 1, 'Deshacer must be offered after applying a voice action');
 
-    const dbAfter = await readDb(page);
-    assertTrue(dbAfter.attendance.some(a => a.status === 'present' && a.date === ANCHOR_ISO && dbAfter.patients.find(p => p.id === a.patientId)?.name === 'Sofía Díaz'),
-      'the voice action must actually be applied to the db');
+    await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
+    const afterApply = await readServerData(page);
+    assertTrue(afterApply.data.attendance.some(a => a.status === 'present' && a.date === ANCHOR_ISO &&
+      afterApply.data.patients.find(p => p.id === a.patientId)?.name === 'Sofía Díaz'),
+      'the voice action must actually be applied and synced to the server');
 
     await page.click('#voice-undo');
     await page.waitForFunction(() => (document.querySelector('#voice-result')?.textContent || '').includes('Deshecho'));
-    const dbUndone = await readDb(page);
-    const stillPresentToday = dbUndone.attendance.some(a => a.date === ANCHOR_ISO && a.status === 'present' &&
-      dbUndone.patients.find(p => p.id === a.patientId)?.name === 'Sofía Díaz');
-    assertTrue(!stillPresentToday, 'Deshacer must restore the pre-batch snapshot');
+    await page.waitForTimeout(700); // undo's own save() debounce, so the server reflects it too
+    const afterUndo = await readServerData(page);
+    const stillPresentToday = afterUndo.data.attendance.some(a => a.date === ANCHOR_ISO && a.status === 'present' &&
+      afterUndo.data.patients.find(p => p.id === a.patientId)?.name === 'Sofía Díaz');
+    assertTrue(!stillPresentToday, 'Deshacer must restore the pre-batch snapshot, synced back to the server too');
   } finally {
     await context.close();
   }
@@ -360,51 +529,73 @@ async function scenarioVoiceTextFallback(browser, origin) {
 async function takeScreenshots(browser, origin) {
   fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
-  const { context, page } = await freshPage(browser);
-  try {
-    await seed(page, origin, buildSeed());
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'hoy.png') });
-
-    await goToView(page, 'semana');
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'semana.png') });
-
-    await goToView(page, 'mes');
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'mes.png') });
-
-    await goToView(page, 'pacientes');
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'pacientes.png') });
-
-    await goToView(page, 'cuentas');
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas.png') });
-
-    await page.route('**/api/voice', async route => {
-      const body = route.request().postDataJSON();
-      const target = body.context.patients[1];
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          actions: [{ type: 'mark_attendance', patientId: target.id, date: body.context.today, status: 'present' }],
-          reply: `Listo, marqué a ${target.name.split(' ')[0]} como presente hoy.`,
-        }),
-      });
-    });
-    await page.click('#mic-fab');
-    await page.waitForSelector('#voice-sheet[open]');
-    await page.fill('#voice-text-input', 'hoy vino Sofía');
-    await page.click('#voice-text-form button[type="submit"]');
-    await page.waitForTimeout(400);
-    await page.screenshot({ path: path.join(SHOTS_DIR, 'voz.png') });
-  } finally {
-    await context.close();
+  {
+    const { context, page } = await freshPage(browser);
+    try {
+      await page.goto(origin);
+      await page.waitForSelector('#auth-view:not([hidden])');
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'login.png') });
+    } finally {
+      await context.close();
+    }
   }
 
-  const { context: darkContext, page: darkPage } = await freshPage(browser, { dark: true });
-  try {
-    await seed(darkPage, origin, buildSeed());
-    await darkPage.screenshot({ path: path.join(SHOTS_DIR, 'hoy-dark.png') });
-  } finally {
-    await darkContext.close();
+  {
+    const { context, page } = await freshPage(browser);
+    try {
+      const email = nextEmail('shots');
+      await signup(page, origin, email);
+      await seedServer(page, buildSeed());
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'hoy.png') });
+
+      await goToView(page, 'semana');
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'semana.png') });
+
+      await goToView(page, 'mes');
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'mes.png') });
+
+      await goToView(page, 'cuentas');
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas.png') });
+
+      const debtRow = page.locator('button[data-act="patient-accounts"]').filter({ has: page.locator('.balance-chip.debe') }).first();
+      await (await debtRow.count() ? debtRow : page.locator('button[data-act="patient-accounts"]').first()).click();
+      await page.waitForSelector('#accounts-sheet[open]');
+      await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas-paciente.png') });
+      await page.click('#accounts-close');
+
+      await page.route('**/api/voice', async route => {
+        const body = route.request().postDataJSON();
+        const target = body.context.patients[1];
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({
+            actions: [{ type: 'mark_attendance', patientId: target.id, date: body.context.today, status: 'present' }],
+            reply: `Listo, marqué a ${target.name.split(' ')[0]} como presente hoy.`,
+          }),
+        });
+      });
+      await page.click('#mic-fab');
+      await page.waitForSelector('#voice-sheet[open]');
+      await page.fill('#voice-text-input', 'hoy vino Sofía');
+      await page.click('#voice-text-form button[type="submit"]');
+      await page.waitForFunction(() => (document.querySelector('#voice-result')?.innerHTML || '').includes('voice-done'));
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'voz.png') });
+    } finally {
+      await context.close();
+    }
+  }
+
+  {
+    const { context, page } = await freshPage(browser, { dark: true });
+    try {
+      const email = nextEmail('shotsdark');
+      await signup(page, origin, email);
+      await seedServer(page, buildSeed());
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'hoy-dark.png') });
+    } finally {
+      await context.close();
+    }
   }
 }
 
@@ -422,11 +613,8 @@ async function main() {
   checkSyntax();
 
   const port = await getFreePort();
-  const env = { ...process.env, PORT: String(port), HOST: '127.0.0.1' };
-  delete env.LLM_BASE_URL;
-  delete env.LLM_API_KEY;
-  delete env.LLM_MODEL;
-  delete env.LLM_EXTRA_HEADERS;
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'consultorio-e2e-'));
+  const env = { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, INSECURE_COOKIES: '1' };
   const origin = `http://127.0.0.1:${port}`;
 
   const serverProc = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -439,11 +627,18 @@ async function main() {
     await waitForServer(`${origin}/`);
     browser = await chromium.launch({ executablePath: CHROMIUM_PATH, args: ['--no-sandbox', '--disable-gpu'] });
 
-    await check('v1 data migrates to v2 and shows correctly', () => scenarioMigration(browser, origin));
+    // Accounts + sync (phase 2)
+    await check('v1 data imports on first login and migrates to v2 on the server', () => scenarioImportOnFirstLogin(browser, origin));
+    await check('session cookie keeps a second page logged in with the same server data', () => scenarioAuthPersistence(browser, origin));
+    await check('a local mutation reaches the server as a new doc version', () => scenarioSyncReachesServer(browser, origin));
+    await check('a stale write gets 409 and adopts the other device\'s server data', () => scenario409Conflict(browser, origin));
+    await check('payments: balance math, "Todo lo que debe", Pagó quick action, voice record_payment', () => scenarioPayments(browser, origin));
+
+    // Carried over from phase 1
     await check('Hoy: explicit Vino/No vino + Deshacer, no silent toggle', () => scenarioAttendanceAndUndo(browser, origin));
     await check('reschedule_once via sheet moves the occurrence, schedule unchanged', () => scenarioReschedule(browser, origin));
     await check('Cuentas sums only present sessions at frozen price', () => scenarioCuentasFrozenPrice(browser, origin));
-    await check('voice sheet text fallback applies actions + Deshacer restores', () => scenarioVoiceTextFallback(browser, origin));
+    await check('voice sheet text fallback applies actions + Deshacer restores (synced)', () => scenarioVoiceTextFallback(browser, origin));
 
     console.log('\nTaking screenshots...');
     await takeScreenshots(browser, origin);
@@ -452,6 +647,7 @@ async function main() {
     if (browser) await browser.close();
     serverProc.kill();
     await Promise.race([once(serverProc, 'exit'), new Promise(r => setTimeout(r, 2000))]);
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
 
   const failed = results.filter(r => !r.ok);

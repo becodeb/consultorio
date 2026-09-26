@@ -183,7 +183,7 @@ function makeLimiter(limit, windowMs) {
   };
 }
 const voiceLimiter = makeLimiter(30, 60_000);
-const authLimiter = makeLimiter(10, 60_000);
+const authLimiter = makeLimiter(30, 60_000);
 const generalLimiter = makeLimiter(120, 60_000);
 
 function clientIp(req) { return req.socket.remoteAddress || 'unknown'; }

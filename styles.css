@@ -157,14 +157,19 @@ button.row { width: 100%; text-align: left; }
   background: color-mix(in srgb, var(--pencil) 12%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--pencil) 45%, var(--line));
   border-left: 5px solid var(--pencil);
-  border-radius: 18px; padding: 18px; margin-bottom: 22px;
+  border-radius: 18px; padding: 14px 16px; margin-bottom: 22px;
 }
-.now-eyebrow { font: 700 13px/1 var(--display); color: var(--ink); opacity: .7; margin-bottom: 8px; }
-.now-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.now-eyebrow { font: 700 13px/1 var(--display); color: var(--ink); opacity: .7; margin-bottom: 6px; }
+.now-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .now-head .dot { width: 12px; height: 12px; }
 .now-name { font: 700 23px/1.2 var(--display); flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .now-time { font: 700 18px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--muted); }
-.now-actions { display: flex; gap: 10px; margin-bottom: 10px; }
+.now-actions { display: flex; gap: 10px; }
+.now-reprogramar {
+  display: block; width: 100%; text-align: center; margin-top: 10px;
+  border: 0; background: none; padding: 8px; font-weight: 700; font-size: 14px;
+  color: var(--muted);
+}
 .settings-line { margin-top: 28px; color: var(--muted); font-size: 14px; }
 .settings-line input { width: 80px; display: inline-block; min-height: 38px; margin-left: 8px; }
 label.inline { display: flex; align-items: center; font-weight: 400; }
@@ -189,7 +194,7 @@ label.inline { display: flex; align-items: center; font-weight: 400; }
 }
 .hour-line { position: absolute; left: 0; right: 0; border-top: 1px solid var(--line); }
 .week-block {
-  position: absolute; left: 2px; right: 2px; border: 0; border-left: 3px solid;
+  position: absolute; border: 0; border-left: 3px solid;
   border-radius: 5px; font-size: 11px; font-weight: 700; font-family: var(--display);
   padding: 2px 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   color: var(--ink); text-align: left;
@@ -376,6 +381,7 @@ dialog {
   border: 0; border-radius: 20px; padding: 0;
   width: min(520px, calc(100vw - 24px)); max-height: calc(100dvh - 24px);
   background: var(--surface); color: var(--ink);
+  overflow-y: auto;
 }
 dialog::backdrop { background: rgba(15, 25, 40, .45); }
 dialog form { padding: 22px 20px 20px; }

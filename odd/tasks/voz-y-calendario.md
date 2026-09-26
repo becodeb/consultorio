@@ -77,7 +77,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
       prefilled with the owed amount) + voice action `record_payment`.
 - [x] T9 AI via ai-router (SSE parsing, tolerant JSON extraction, one retry on bad JSON);
       send only first name + surname initial to the model.
-- [ ] T10 Polish (Ahora card actions, Semana overlaps) + e2e/screenshots updated.
+- [x] T10 Polish (Ahora card actions, Semana overlaps) + e2e/screenshots updated.
 - [ ] T11 Dockerfile + docker-compose.yml, GitHub repo, Coolify app, domain, live checks.
 
 ## Acceptance criteria
@@ -407,6 +407,63 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   took over as preferred — every answer stayed correct through that handoff, which is a
   real (not simulated) exercise of the router's own failover.
 
+- T10 (commit pending): **Ahora card** — "Reprogramar" is now a full-width secondary text
+  button on its own line directly under the two big buttons (`.now-reprogramar`), card
+  vertical padding tightened (18px→14px), no more floating gap. **Semana overlaps** —
+  added `layoutDayColumn()`: mutually-overlapping appointments in a day column are grouped
+  and packed into the fewest side-by-side lanes (Google-Calendar-style greedy algorithm),
+  each block's `left`/`width` set from its lane instead of always spanning the full column;
+  verified with real 09:00/09:30 overlapping data (two 45-min sessions) rendering as two
+  narrow side-by-side blocks, neither hidden. **Voice sheet vs. bottom nav** — confirmed via
+  screenshot that native `<dialog>` (`showModal()`) already paints above the fixed nav/FAB
+  regardless of z-index (top-layer), so this was not actually broken; added `overflow-y:
+  auto` to the base `dialog` rule as a safety net so a longer result list scrolls inside
+  the sheet instead of visually overflowing it, and confirmed the last Semana hour (20:00)
+  clears the nav/FAB with room to spare when scrolled to the bottom.
+
+  **`tools/e2e.mjs` rewritten** for the auth-gated app: server now starts with a temp
+  `DATA_DIR` (`fs.mkdtempSync`, removed in `finally`) and `INSECURE_COOKIES=1`. New
+  `signup()`/`login()`/`seedServer()` (writes a doc straight to `PUT /api/data`, bypassing
+  the UI, then reloads so the page's in-memory `docVersion` catches up) and
+  `readServerData()` helpers. Every scenario runs behind a real account now; each phase-1
+  scenario was ported (unique email per scenario, `seed()`→`seedServer()`, `readDb()`→
+  `readServerData()`). Five new scenarios:
+  - **v1 import on first login**: writes legacy `consultorio.v1` data before signup —
+    covers both "v1 data loads without loss" (phase 1) and "import of pre-existing local
+    data on first login" (phase 2) with one honest scenario, since first login *is* the
+    migration path now. Asserts the imported patient is visible **and** that the server
+    doc (not just the local cache) is version 2 with the migrated shape.
+  - **Auth persistence**: a second `page` in the *same* browser context (shared cookie)
+    opens already authenticated and loads the same server data — no separate login step.
+  - **Sync reaches the server**: a local mutation is followed by `GET /api/data` showing a
+    bumped version.
+  - **409 conflict**: two separate contexts log into the *same* account; device B writes
+    behind device A's back via a raw `PUT`; device A's own (now-stale) edit gets a 409 and
+    the UI adopts device B's value — asserted by reading the live DOM after the toast, not
+    by trusting the response alone.
+  - **Payments**: opens the accounts sheet for a patient who owes money, asserts the
+    prefilled amount, exercises "Todo lo que debe" (change the field, click it, assert it
+    restored the full balance), registers the payment and asserts "Al día", exercises
+    Hoy's "Pagó" quick action (chip becomes "Pagado"), and mocks `record_payment` with
+    `amount:null` through the voice text fallback.
+
+  **Two real bugs found while running this against the rewritten suite** (not just review):
+  (1) the auth rate limit (10 req/min/IP) started rejecting the e2e script's own signups
+  partway through the run — 9 scenarios × 1 signup each is exactly the kind of legitimate
+  burst a household or a test suite produces; raised to 30/min (still a real throttle:
+  `scrypt` makes each attempt CPU-costly regardless of the count). (2) the voice-fallback
+  scenario asserted the server had synced *immediately* after the action rendered, racing
+  `save()`'s own 500ms debounce; added a matching wait before reading `GET /api/data`.
+
+  Checks: `node --check app.js server.mjs tools/e2e.mjs` pass. Full suite run twice back
+  to back — 9/9 scenarios green both times, no flakes. Screenshots (390×844 @2x) written
+  to `shots/`: `login.png`, `hoy.png` (Ahora card's new Reprogramar layout, plus the "Pagó"
+  quick action on a present row), `semana.png` (the 09:00/09:30 overlap rendered
+  side-by-side, confirmed in the actual screenshot, not just asserted), `mes.png`,
+  `cuentas.png`, `cuentas-paciente.png` (payment form, quick buttons, session/payment
+  history), `voz.png` (sheet open above the nav, result + Deshacer), `hoy-dark.png`. All
+  inspected by hand — no overflow, no nav/FAB overlap, dark mode legible.
+
 ## Next step
 
-T10.
+T11.
