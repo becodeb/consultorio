@@ -497,8 +497,20 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   volume were all removed afterward — nothing left running, no `compose up` was run against
   this box.
 
+## Deploy (T11, coordinator, 2026-09-27)
+
+- GitHub: `becodeb/consultorio` (public; history scanned for keys: clean).
+- Coolify (coolify.becode.com.ar): app `consultorio`, uuid `9lnqhagr0yfvtfwdkmqj7s6v`,
+  dockercompose, service `app`, domains `https://consultorio.becode.com.ar` +
+  sslip fallback. No auto-deploy (public repo): redeploy via API after each push.
+- Live checks: `/`, `/api/health`, assets → 200 over HTTPS; `/api/me` and `/api/voice`
+  → 401 unauthenticated; wrong login → 401 without cookie; served `app.js` sha256
+  equals local (asset URLs versioned `?v=<build time>`); status `running:healthy`.
+- Not verified live: a real signup + voice call against production (avoided creating
+  test data in prod; the free ai-router cascade was verified from the Pi with 10 calls).
+- Local server on 8811 stopped (its `data/` DB is separate from production).
+
 ## Next step
 
-None — T1–T11 (files) all done. GitHub repo creation, the Coolify app, the
-`consultorio.becode.com.ar` domain, and post-deploy live checks are explicitly the
-coordinator's own follow-up, per the phase-2 instructions.
+User's first real use on the phone: create the account, load patients, try the mic.
+Engram mirror still pending (engram does not resolve project `consultorio`).
