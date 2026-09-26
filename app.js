@@ -502,7 +502,7 @@ function hideAuthView() {
 }
 function updateAuthUi() {
   authSubmit.textContent = authMode === 'login' ? 'Entrar' : 'Crear cuenta';
-  authToggle.textContent = authMode === 'login' ? 'No tenés cuenta. Creá una' : 'Ya tenés cuenta. Entrá';
+  authToggle.textContent = authMode === 'login' ? '¿No tenés cuenta? Creá una' : '¿Ya tenés cuenta? Entrá';
   authError.hidden = true;
 }
 authToggle.addEventListener('click', () => { authMode = authMode === 'login' ? 'signup' : 'login'; updateAuthUi(); });

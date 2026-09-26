@@ -164,9 +164,10 @@ button.row { width: 100%; text-align: left; }
 .now-head .dot { width: 12px; height: 12px; }
 .now-name { font: 700 23px/1.2 var(--display); flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .now-time { font: 700 18px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--muted); }
-.now-actions { display: flex; gap: 10px; }
+.now-actions { display: flex; gap: 10px; align-items: center; }
+.now-actions .btn-mark { margin: 0; }
 .now-reprogramar {
-  display: block; width: 100%; text-align: center; margin-top: 10px;
+  display: block; width: 100%; text-align: center; margin-top: 4px;
   border: 0; background: none; padding: 8px; font-weight: 700; font-size: 14px;
   color: var(--muted);
 }
