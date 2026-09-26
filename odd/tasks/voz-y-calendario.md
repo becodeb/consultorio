@@ -70,7 +70,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ### Phase 2 tasks
 
-- [ ] T7 Server storage + auth: node:sqlite users/sessions/docs, scrypt, long-lived
+- [x] T7 Server storage + auth: node:sqlite users/sessions/docs, scrypt, long-lived
       `__Host-` session cookie, login/signup screen, sync with version check, import of
       existing local data on first login.
 - [ ] T8 Payments: data + Cuentas UI (owed / paid / balance per patient, register payment
@@ -269,8 +269,62 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   `/tmp/consultorio-server.log`. Verified `curl http://127.0.0.1:8811/` → 200 and a live
   `POST /api/voice` call answers correctly.
 
+- T7 (commit pending): `server.mjs` gained `node:sqlite` storage (`users`, `sessions`,
+  `docs` tables, WAL mode, `DATA_DIR` env, gitignored) and full auth: `scrypt` password
+  hashing (`scrypt$N$r$p$salt$hash`, `timingSafeEqual` compare), a random 32-byte session
+  token whose sha256 is the only thing stored server-side, `__Host-consultorio`
+  (Secure/HttpOnly/SameSite=Lax/Path=/, 400-day Max-Age), and a relaxed non-Secure
+  `consultorio` cookie only when `INSECURE_COOKIES=1` AND the request isn't HTTPS (via
+  `x-forwarded-proto`, since Coolify/Traefik terminates TLS) — for local dev/e2e, documented
+  in the module comment and `README.md`. Endpoints: `POST /api/signup|login|logout`,
+  `GET /api/me`, `GET /api/data`, `PUT /api/data` (optimistic concurrency via
+  `baseVersion`, 409 returns the current server `{data,version}`). All mutating endpoints
+  reject non-JSON `Content-Type` and a mismatched `Origin` header; login/signup are
+  rate-limited separately (10/min/IP) from the general per-IP API limit (120/min) and the
+  existing voice limit (30/min); `/api/voice` now requires a session.
+
+  Client: `boot()` calls `GET /api/me` before anything else; 401 shows a full-screen auth
+  view (email/password, Entrar/Crear cuenta toggle, mapped error strings). On success,
+  `afterLogin()` loads `GET /api/data`; an empty server doc imports any existing
+  `consultorio.v1` (v1 or v2) through the same `migrate()` used since T1, then pushes it
+  so the server has a real doc to build on — existing browser data is never lost. Every
+  mutation still calls the same `save()` used throughout the app (unchanged call sites);
+  it now writes an instant per-user `consultorio.cache.<userId>` localStorage cache and
+  debounces (500ms) a `PUT /api/data`. A failed/offline push keeps a `dirty` flag, shows
+  a small "Sin conexión, guardando al volver" indicator, and retries on the `online` event
+  and every 15s. A `409` adopts the server's `{data,version}`, re-renders, and toasts "Se
+  actualizó desde otro dispositivo" — no client-side merge, server wins. Logout
+  (`POST /api/logout` + reload) sits at the bottom of Pacientes next to the account email.
+
+  **Two real bugs found and fixed while smoke-testing (not just code review):**
+  (1) `process.removeAllListeners('warning')` never suppressed the `node:sqlite`
+  experimental warning because a static `import` is hoisted above it regardless of source
+  order — the warning fires during import evaluation, before any of the importing
+  module's own code runs. Fixed by using a dynamic `await import('node:sqlite')` instead,
+  which is not hoisted. (2) The auth overlay, bottom nav and mic FAB each combine a
+  `hidden` attribute (toggled from JS) with a class that sets an explicit `display`
+  value; since `[hidden]` and a class selector have equal CSS specificity, the later
+  author rule always won over the browser's built-in `[hidden]{display:none}`, so setting
+  `hidden` did nothing and the auth overlay kept intercepting clicks even when "hidden".
+  Fixed with an explicit `.auth-view[hidden]`/`nav.tabs[hidden]`/`.fab[hidden] { display:
+  none; }` override for each. Caught by a Playwright smoke test that tried to click
+  through the (visually invisible in a screenshot, but still there) overlay and timed out
+  — a static review of the CSS would very plausibly have missed this.
+
+  Checks (ad hoc Playwright/Chromium scripts, not yet folded into `tools/e2e.mjs` — that's
+  T10): `node --check app.js server.mjs` pass. `curl`: signup → 200 + cookie, `/api/me`
+  with/without cookie → 200/401, `GET /api/data` on a fresh account → `{data:null,
+  version:0}`, `PUT` with `baseVersion:0` → `{version:1}`, repeating the same stale
+  `baseVersion:0` → `409` with the real current doc, duplicate signup → 409, wrong
+  password → 401, logout → 204, `/api/voice` without a session → 401. Playwright: signup
+  with pre-existing local v1 data → patient visible in Pacientes + email shown in footer;
+  reload with the session cookie → still logged in, same data loaded from the server (not
+  re-imported); marking attendance → the debounced `PUT` lands (`GET /api/data` shows the
+  new version and the attendance row) within ~900ms; a simulated second-device write
+  (direct `PUT` bumping the version) followed by a local edit → 409 → toast shown, and the
+  *other device's* value (not the local edit) is what's kept, confirming server-wins
+  conflict resolution.
+
 ## Next step
 
-None — T1–T6 all done. Possible follow-ups if the psicopedagoga wants them later: a
-patient search/filter for large caseloads, an "editable not needed" color override, and
-periodically renewing the OpenCode Go session header if that plan's quota changes.
+T8.

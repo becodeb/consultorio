@@ -343,19 +343,189 @@ const state = {
   month: firstOfMonth(new Date()),
   editing: null,
 };
-let db = load();
-save(); // persist a v1->v2 migration immediately, so it never has to be redone/re-read as v1
+let db = null;
+let userId = null;
+let userEmail = null;
+let docVersion = 0;
+let dirty = false;
+let pushInFlight = false;
+let pushQueued = false;
+let saveDebounceTimer = null;
 
-function load() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) return migrate(JSON.parse(raw));
-  } catch {}
-  return emptyDb();
+function cacheKeyFor(id) { return `consultorio.cache.${id}`; }
+function persistCache(id, dbObj, version) {
+  try { localStorage.setItem(cacheKeyFor(id), JSON.stringify({ db: dbObj, version })); } catch {}
 }
+function readCache(id) {
+  try {
+    const raw = localStorage.getItem(cacheKeyFor(id));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.db) return parsed;
+  } catch {}
+  return null;
+}
+
+function setSyncIndicator(show) {
+  const el = document.getElementById('sync-indicator');
+  if (el) el.hidden = !show;
+}
+
+/** Local mutations call this. Persists an instant local cache, then debounces a PUT to
+ *  the server so rapid successive edits (e.g. several voice actions) coalesce into one. */
 function save() {
-  try { localStorage.setItem(KEY, JSON.stringify(db)); }
-  catch { toast('No se pudo guardar en este navegador'); }
+  if (!userId) return;
+  persistCache(cacheKeyFor(userId), db, docVersion);
+  dirty = true;
+  clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(pushToServer, 500);
+}
+
+async function pushToServer() {
+  if (!userId) return;
+  if (pushInFlight) { pushQueued = true; return; }
+  pushInFlight = true;
+  try {
+    const res = await fetch('/api/data', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: db, baseVersion: docVersion }),
+    });
+    if (res.status === 409) {
+      const body = await res.json();
+      db = body.data ? migrate(body.data) : emptyDb();
+      docVersion = body.version;
+      dirty = false;
+      persistCache(cacheKeyFor(userId), db, docVersion);
+      render();
+      toast('Se actualizó desde otro dispositivo');
+      setSyncIndicator(false);
+    } else if (res.ok) {
+      const body = await res.json();
+      docVersion = body.version;
+      persistCache(cacheKeyFor(userId), db, docVersion);
+      dirty = false;
+      setSyncIndicator(false);
+    } else {
+      setSyncIndicator(true);
+    }
+  } catch {
+    setSyncIndicator(true); // offline or unreachable: stays dirty, retried below
+  } finally {
+    pushInFlight = false;
+    if (pushQueued) { pushQueued = false; pushToServer(); }
+  }
+}
+
+window.addEventListener('online', () => { if (dirty) pushToServer(); });
+setInterval(() => { if (dirty) pushToServer(); }, 15000);
+
+/* ---------- auth + boot ---------- */
+const authView = document.getElementById('auth-view');
+const authForm = document.getElementById('auth-form');
+const authError = document.getElementById('auth-error');
+const authSubmit = document.getElementById('auth-submit');
+const authToggle = document.getElementById('auth-toggle');
+let authMode = 'login';
+
+function showAuthView() {
+  authView.hidden = false;
+  document.querySelector('nav.tabs').hidden = true;
+  document.getElementById('mic-fab').hidden = true;
+  app.hidden = true;
+}
+function hideAuthView() {
+  authView.hidden = true;
+  document.querySelector('nav.tabs').hidden = false;
+  document.getElementById('mic-fab').hidden = false;
+  app.hidden = false;
+}
+function updateAuthUi() {
+  authSubmit.textContent = authMode === 'login' ? 'Entrar' : 'Crear cuenta';
+  authToggle.textContent = authMode === 'login' ? 'No tenés cuenta. Creá una' : 'Ya tenés cuenta. Entrá';
+  authError.hidden = true;
+}
+authToggle.addEventListener('click', () => { authMode = authMode === 'login' ? 'signup' : 'login'; updateAuthUi(); });
+authForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  const email = authForm.elements.email.value.trim();
+  const password = authForm.elements.password.value;
+  authError.hidden = true;
+  authSubmit.disabled = true;
+  try {
+    const res = await fetch(authMode === 'login' ? '/api/login' : '/api/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      authError.textContent = res.status === 409 ? 'Ya existe una cuenta con ese mail'
+        : res.status === 401 ? 'Mail o contraseña incorrectos'
+        : (body.error || 'No se pudo completar la acción');
+      authError.hidden = false;
+      return;
+    }
+    await afterLogin(body);
+  } catch {
+    authError.textContent = 'No se pudo conectar con el servidor';
+    authError.hidden = false;
+  } finally {
+    authSubmit.disabled = false;
+  }
+});
+
+/** Runs once, right after a successful login/signup or a boot-time GET /api/me hit. Loads
+ *  the account's server doc (importing pre-existing local v1/v2 data on a first login with
+ *  an empty server doc), falls back to the per-user local cache when offline. */
+async function afterLogin({ id, email }) {
+  userId = id;
+  userEmail = email;
+
+  let serverDoc = null;
+  try {
+    const res = await fetch('/api/data');
+    if (res.ok) serverDoc = await res.json();
+  } catch { /* offline: handled below */ }
+
+  if (serverDoc && serverDoc.data) {
+    db = migrate(serverDoc.data);
+    docVersion = serverDoc.version;
+    persistCache(cacheKeyFor(userId), db, docVersion);
+  } else if (serverDoc && serverDoc.data === null) {
+    const legacyRaw = localStorage.getItem(KEY);
+    if (legacyRaw) {
+      try { db = migrate(JSON.parse(legacyRaw)); } catch { db = emptyDb(); }
+    } else {
+      db = emptyDb();
+    }
+    docVersion = 0;
+    persistCache(cacheKeyFor(userId), db, docVersion);
+    save(); // push the imported/empty doc so the server has a version 1 to build on
+  } else {
+    const cached = readCache(cacheKeyFor(userId));
+    if (cached) {
+      db = migrate(cached.db);
+      docVersion = cached.version || 0;
+    } else {
+      const legacyRaw = localStorage.getItem(KEY);
+      db = legacyRaw ? migrate(JSON.parse(legacyRaw)) : emptyDb();
+      docVersion = 0;
+    }
+    setSyncIndicator(true);
+  }
+
+  hideAuthView();
+  render();
+}
+
+async function boot() {
+  try {
+    const res = await fetch('/api/me');
+    if (res.ok) { await afterLogin(await res.json()); return; }
+  } catch { /* fall through to auth view */ }
+  updateAuthUi();
+  showAuthView();
 }
 
 let toastTimer;
@@ -491,7 +661,7 @@ function renderHoy() {
 }
 
 setInterval(() => {
-  if (state.view !== 'hoy') return;
+  if (!db || state.view !== 'hoy') return;
   const slot = document.getElementById('now-card-slot');
   if (slot) slot.innerHTML = nowCardHtml();
 }, 30000);
@@ -629,6 +799,10 @@ function renderPacientes() {
     <label class="inline">Duración de sesión (minutos)
       <input type="number" id="session-minutes" min="5" step="5" value="${db.settings.sessionMinutes}">
     </label>
+  </div>
+  <div class="settings-line account-line">
+    <span class="muted">${esc(userEmail || '')}</span>
+    <button class="btn ghost small" data-act="logout">Cerrar sesión</button>
   </div>`;
   app.innerHTML = html;
 }
@@ -782,6 +956,9 @@ app.addEventListener('click', e => {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   } else if (act === 'import') {
     document.getElementById('import-file').click();
+  } else if (act === 'logout') {
+    if (!confirm('¿Cerrar sesión?')) return;
+    fetch('/api/logout', { method: 'POST' }).finally(() => { window.location.reload(); });
   }
 });
 
@@ -989,4 +1166,4 @@ voiceTextForm.addEventListener('submit', e => {
   submitVoiceText(text);
 });
 
-render();
+boot();

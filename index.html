@@ -12,7 +12,26 @@
 </head>
 <body>
 
-<nav class="tabs" role="tablist">
+<div id="auth-view" class="auth-view" hidden>
+  <div class="auth-card">
+    <h1 class="auth-title">Consultorio</h1>
+    <form id="auth-form" novalidate>
+      <label>Mail
+        <input type="email" name="email" required autocomplete="email" inputmode="email">
+      </label>
+      <label>Contraseña
+        <input type="password" name="password" required autocomplete="current-password" minlength="8">
+      </label>
+      <p class="auth-error" id="auth-error" hidden></p>
+      <button type="submit" class="btn primary wide" id="auth-submit">Entrar</button>
+    </form>
+    <button type="button" class="btn ghost wide" id="auth-toggle">¿No tenés cuenta? Creá una</button>
+  </div>
+</div>
+
+<div id="sync-indicator" class="sync-indicator" role="status" hidden>Sin conexión, guardando al volver</div>
+
+<nav class="tabs" role="tablist" hidden>
   <button role="tab" data-view="hoy">
     <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/><circle cx="12" cy="15.5" r="1.6" fill="currentColor" stroke="none"/></svg></span>
     <span class="tab-label">Hoy</span>
@@ -35,7 +54,7 @@
   </button>
 </nav>
 
-<main class="wrap" id="app"></main>
+<main class="wrap" id="app" hidden></main>
 
 <dialog id="editor">
   <form method="dialog" id="editor-form">
@@ -96,7 +115,7 @@
   </div>
 </dialog>
 
-<button id="mic-fab" class="fab" aria-label="Asistente por voz" aria-haspopup="dialog"></button>
+<button id="mic-fab" class="fab" aria-label="Asistente por voz" aria-haspopup="dialog" hidden></button>
 
 <input type="file" id="import-file" accept="application/json" hidden>
 <div class="toast" id="toast" role="status"></div>
