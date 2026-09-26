@@ -404,6 +404,7 @@ function nowCardHtml() {
     return `<div class="next-line">Próximo: ${esc(p.name)} ${info.time}</div>`;
   }
   return `<div class="now-card">
+    <div class="now-eyebrow">${info.phase === 'grace' ? 'Todavía sin marcar' : 'Ahora'}</div>
     <div class="now-head">
       <span class="dot" style="background:${p.color}"></span>
       <span class="now-name">${esc(p.name)}</span>
@@ -423,20 +424,22 @@ function apptRowHtml(a) {
   const status = a.status;
   const rowClass = status === 'present' ? 'present' : status === 'absent' ? 'absent' : '';
   const movedBadge = a.moved
-    ? `<div class="moved-badge">reprogramado · antes: ${DAY_SHORT[weekdayOf(a.moved.fromDate)]} ${a.moved.fromTime}</div>`
+    ? `<div class="moved-badge"><span class="moved-pill">Reprogramado</span> antes ${DAY_SHORT[weekdayOf(a.moved.fromDate)]} ${a.moved.fromTime}</div>`
     : '';
   const actionsHtml = !status
     ? `<button class="btn-mark vino" data-act="mark" data-status="present" data-id="${p.id}" data-time="${a.time}">${CHECK}Vino</button>
        <button class="btn-mark novino" data-act="mark" data-status="absent" data-id="${p.id}" data-time="${a.time}">${XICON}No vino</button>`
     : `<span class="chip ${status}">${status === 'present' ? 'Vino' : 'No vino'}</span>
        <button class="btn ghost small" data-act="undo" data-id="${p.id}" data-time="${a.time}">Deshacer</button>`;
-  return `<li class="row ${rowClass} ${a.moved ? 'moved' : ''}">
-    <span class="dot" style="background:${p.color}"></span>
-    <span class="time">${a.time || '—'}</span>
-    <span class="who"><span class="name">${esc(p.name)}</span>
-      <div class="sub">${moneyFmt(p.price)}</div>${movedBadge}</span>
+  return `<li class="row appt ${rowClass} ${a.moved ? 'moved' : ''}">
+    <div class="row-main">
+      <span class="dot" style="background:${p.color}"></span>
+      <span class="time">${a.time || '—'}</span>
+      <span class="who"><span class="name">${esc(p.name)}</span>
+        <div class="sub">${moneyFmt(p.price)}</div>${movedBadge}</span>
+      <button class="icon-btn" data-act="reprogramar" data-id="${p.id}" data-time="${a.time}" aria-label="Reprogramar a ${esc(p.name)}">${KEBAB}</button>
+    </div>
     <div class="row-actions">${actionsHtml}</div>
-    <button class="icon-btn" data-act="reprogramar" data-id="${p.id}" data-time="${a.time}" aria-label="Reprogramar a ${esc(p.name)}">${KEBAB}</button>
   </li>`;
 }
 
@@ -654,7 +657,7 @@ function renderCuentas() {
       <button class="arrow" data-act="month" data-step="1" aria-label="Mes siguiente">${NEXT}</button>
     </div>
     <div class="big"><span class="num">${moneyFmt(total)}</span>
-      <div class="sub">${present.length} ${present.length === 1 ? 'sesión' : 'sesiones'}${absentCount ? ` · ${absentCount} ${absentCount === 1 ? 'ausencia' : 'ausencias'}` : ''}</div></div>`;
+      <div class="sub">${present.length} ${present.length === 1 ? 'sesión' : 'sesiones'}${absentCount ? `, ${absentCount} ${absentCount === 1 ? 'ausencia' : 'ausencias'}` : ''}</div></div>`;
 
   if (rows.length) {
     html += '<ul class="list">' + rows.map(r => `<li class="row">
@@ -819,7 +822,7 @@ function openReschedule(patientId, date, time) {
   rescheduleCtx = { patientId, date, time };
   const p = findPatient(db, patientId);
   document.getElementById('reschedule-who').textContent =
-    `${p ? p.name : ''} · ${DAY_SHORT[weekdayOf(date)]} ${time || ''}`;
+    `${p ? p.name : ''} (${DAY_SHORT[weekdayOf(date)]} ${time || ''})`;
   document.getElementById('reschedule-once-fields').hidden = true;
   document.getElementById('reschedule-confirm').hidden = true;
   rescheduleForm.elements.toDate.value = date;

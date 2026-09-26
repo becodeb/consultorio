@@ -13,11 +13,26 @@
 <body>
 
 <nav class="tabs" role="tablist">
-  <button role="tab" data-view="hoy">Hoy</button>
-  <button role="tab" data-view="semana">Semana</button>
-  <button role="tab" data-view="mes">Mes</button>
-  <button role="tab" data-view="pacientes">Pacientes</button>
-  <button role="tab" data-view="cuentas">Cuentas</button>
+  <button role="tab" data-view="hoy">
+    <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/><circle cx="12" cy="15.5" r="1.6" fill="currentColor" stroke="none"/></svg></span>
+    <span class="tab-label">Hoy</span>
+  </button>
+  <button role="tab" data-view="semana">
+    <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18"/><path d="M8 3v4M16 3v4"/><path d="M8 14v4M12 13v5M16 15v3"/></svg></span>
+    <span class="tab-label">Semana</span>
+  </button>
+  <button role="tab" data-view="mes">
+    <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M9 10v11M15 10v11"/><path d="M8 3v4M16 3v4"/></svg></span>
+    <span class="tab-label">Mes</span>
+  </button>
+  <button role="tab" data-view="pacientes">
+    <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="8.7" r="2.6"/><path d="M15.8 14.3c2.7.5 4.7 2.8 4.7 5.9"/></svg></span>
+    <span class="tab-label">Pacientes</span>
+  </button>
+  <button role="tab" data-view="cuentas">
+    <span class="tab-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v9M9.6 15c0 1.1 1.1 2 2.4 2s2.4-.8 2.4-1.9c0-2.6-4.8-1.3-4.8-3.9 0-1.1 1.1-1.9 2.4-1.9s2.4.8 2.4 1.9"/></svg></span>
+    <span class="tab-label">Cuentas</span>
+  </button>
 </nav>
 
 <main class="wrap" id="app"></main>
@@ -48,7 +63,7 @@
     <p class="sub" id="reschedule-who"></p>
     <div class="dialog-actions" style="flex-direction:column;align-items:stretch;gap:10px;margin-top:0">
       <button type="button" class="btn wide" data-choice="once">Solo esta vez…</button>
-      <button type="button" class="btn wide" data-choice="cancel">Cancelar esta sesión</button>
+      <button type="button" class="btn wide" style="color:var(--danger)" data-choice="cancel">Cancelar esta sesión</button>
       <button type="button" class="btn wide ghost" data-choice="fixed">Cambiar horario fijo</button>
     </div>
     <div id="reschedule-once-fields" hidden style="margin-top:16px">

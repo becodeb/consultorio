@@ -50,7 +50,7 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
 - [x] T3 Week calendar + month calendar views.
 - [x] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
       action validation + apply + undo.
-- [ ] T5 Visual polish across all views, bottom navigation.
+- [x] T5 Visual polish across all views, bottom navigation.
 - [ ] T6 Playwright e2e + screenshots (390×844).
 
 Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
@@ -153,6 +153,43 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   correct on immediate retry — treated as a provider hiccup, not a prompt defect).
   Every produced action shape matched the schema and passed client-side validation.
 
+- T5 (commit pending): adopted the exact spec tokens (`--paper #F5F7FA`, `--line #DCE3EA`,
+  vino/novino/moved values, 8-color patient palette — the palette and status colors had
+  already been picked to match in T1–T2), swapped the faint line grid for a dot grid
+  (`radial-gradient` dots every 22px at `color-mix(ink 6%)`), row radius 14→16px, and
+  turned the top tab bar into a fixed bottom nav (5 tabs, inline SVG icon + short label,
+  `env(safe-area-inset-bottom)`, selected tab gets an ink label + a pencil-tinted icon
+  pill) with the mic FAB fixed above it. Reworded the three "·" middle-dot strings found
+  (moved badge, Cuentas absences line, reschedule sheet subtitle) to plain
+  words/parentheses/commas per the "no middle-dot meta strings" rule. Made the Ahora card
+  the visually heaviest element (pencil-tinted background + left edge, larger name/time
+  type, an "Ahora"/"Todavía sin marcar" eyebrow).
+
+  **Bug found and fixed during this pass**: the Hoy row layout broke at 390px — cramming
+  the dot, time, name, price, the two "Vino"/"No vino" buttons and the kebab menu into one
+  flex row left `.who` (`flex:1; min-width:0`) almost no space, so the patient name wrapped
+  one letter per line (confirmed with a Playwright screenshot, not just code review).
+  Fixed by splitting each appointment row into a `.row-main` info line (dot, time, name,
+  price, kebab) and a `.row-actions` line below it (the two full-width action buttons, or
+  the chip + Deshacer) — `.row.appt { flex-direction: column }`. Re-screenshotted after the
+  fix: name renders on one line, both buttons fit comfortably, no console errors, and the
+  earlier `mark`/`undo`/`reprogramar` Playwright checks (T2/T4 smoke scripts) still pass
+  since the `data-act` delegation is unaffected by the DOM nesting change.
+
+  Also discovered while screenshotting: Playwright's `fullPage: true` duplicates
+  `position: fixed` elements (nav/FAB) at odd scroll offsets in the stitched image — that
+  is a screenshot-capture artifact, not a layout bug; confirmed by re-shooting the same
+  views as plain viewport screenshots (no `fullPage`), which is also what T6's required
+  390×844 screenshots use. Verified the bottom-nav content clearance by scrolling
+  Pacientes (the longest view, with the session-length field last) all the way down: the
+  input clears the fixed nav/FAB with room to spare.
+
+  Checks: `node --check app.js server.mjs` pass. Playwright/Chromium screenshots at
+  390×844 (light: Hoy with Ahora card + green/red/moved rows, Semana, Mes, Pacientes,
+  Cuentas, voice sheet; dark: Hoy) inspected by hand — no overflow, no truncated-beyond-
+  legibility text, bottom nav/FAB never obscure unreachable content, dark mode legible
+  (tightened the Ahora-card eyebrow color afterwards for low contrast in dark mode).
+
 ## Next step
 
-T5.
+T6.
