@@ -43,7 +43,7 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
 
 ## Tasks
 
-- [ ] T1 Data model v2 + migration: appointments computed from weekly schedule + one-off
+- [x] T1 Data model v2 + migration: appointments computed from weekly schedule + one-off
       changes (move / cancel / extra); attendance with `present` | `absent` and frozen price.
 - [ ] T2 Today view redesign: pre-filled list, Vino (green) / No vino (red) / Reprogramar,
       undo, "now" card, reschedule sheet.
@@ -67,8 +67,16 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ## Progress / evidence
 
-(filled per task)
+- T1 (commit `99c7d06`): split `index.html`/`styles.css`/`app.js`; added `migrate()`
+  (v1 `{patients,sessions}` → v2 `{patients,changes,attendance,settings}`, assigning a
+  palette color and a `since` date per patient), and the pure `appointmentsOn(db,isoDate)`
+  function (weekly schedule + move/cancel/extra changes + attached attendance status,
+  including legacy attendance with no matching appointment). Hoy/Cuentas adapted to read
+  from `attendance`/`appointmentsOn` instead of the old `sessions` array; UI/UX unchanged
+  for now (redesign is T2/T5). `node --check app.js` passes. Correctness of the new
+  functions is exercised end-to-end by the Playwright suite in T6 (migration, attendance,
+  reschedule, frozen price).
 
 ## Next step
 
-T1.
+T2.
