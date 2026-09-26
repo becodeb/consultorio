@@ -55,6 +55,31 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
 
 Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
+## Phase 2 scope (authorized by the user on 2026-09-26, mid-session)
+
+- Account with email + password; the phone stays logged in (enter it once). Data moves to
+  the server per account (source of truth), local cache for offline.
+- Payments: record whether a patient paid, how much (the full owed amount or another
+  amount), by UI and by voice. Balance per patient = present sessions − payments.
+- AI goes through `https://ai-router.becode.com.ar` (docs: GitHub `ezemastro/ai-router`,
+  local clone `~/projects/ai_router/README.md`) instead of a direct provider.
+- Deploy to `coolify.becode.com.ar` with docker compose on a `*.becode.com.ar` domain of
+  our choice → `consultorio.becode.com.ar`.
+- Polish from review of phase 1 screenshots: "Reprogramar" floats loose in the Ahora card;
+  overlapping blocks in Semana (09:00 and 09:30) cover each other.
+
+### Phase 2 tasks
+
+- [ ] T7 Server storage + auth: node:sqlite users/sessions/docs, scrypt, long-lived
+      `__Host-` session cookie, login/signup screen, sync with version check, import of
+      existing local data on first login.
+- [ ] T8 Payments: data + Cuentas UI (owed / paid / balance per patient, register payment
+      prefilled with the owed amount) + voice action `record_payment`.
+- [ ] T9 AI via ai-router (SSE parsing, tolerant JSON extraction, one retry on bad JSON);
+      send only first name + surname initial to the model.
+- [ ] T10 Polish (Ahora card actions, Semana overlaps) + e2e/screenshots updated.
+- [ ] T11 Dockerfile + docker-compose.yml, GitHub repo, Coolify app, domain, live checks.
+
 ## Acceptance criteria
 
 - Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
