@@ -45,7 +45,7 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
 
 - [x] T1 Data model v2 + migration: appointments computed from weekly schedule + one-off
       changes (move / cancel / extra); attendance with `present` | `absent` and frozen price.
-- [ ] T2 Today view redesign: pre-filled list, Vino (green) / No vino (red) / Reprogramar,
+- [x] T2 Today view redesign: pre-filled list, Vino (green) / No vino (red) / Reprogramar,
       undo, "now" card, reschedule sheet.
 - [ ] T3 Week calendar + month calendar views.
 - [ ] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
@@ -77,6 +77,22 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   functions is exercised end-to-end by the Playwright suite in T6 (migration, attendance,
   reschedule, frozen price).
 
+- T2 (commit pending): each Hoy row now shows an explicit "Vino"/"No vino" pair when
+  unmarked, and a colored chip + explicit "Deshacer" button when marked (no silent
+  toggle). Rows tint green/red via `.row.present`/`.row.absent`. Added the "Ahora" card
+  (`currentOrNextAppointment`, ongoing window + 15 min grace, falls back to a "Próximo: …"
+  line), refreshed every 30s via a dedicated `#now-card-slot` (does not re-render the rest
+  of the page, so no UI state is lost). Added the reschedule sheet (`<dialog id="reschedule">`)
+  with "Solo esta vez" (date+time picker → `rescheduleOccurrence`), "Cancelar esta sesión"
+  (→ `cancelOccurrence`, native confirm) and "Cambiar horario fijo" (opens the existing
+  patient editor; the weekly `schedule` is never touched by these). Session length is
+  editable in Pacientes' footer (`db.settings.sessionMinutes`). "Otro paciente…" now records
+  an `extra` change plus immediate `present` attendance, so it also appears correctly in
+  Semana/Mes (T3). Manually smoke-tested with Playwright/Chromium (ad hoc script, not yet
+  the T6 harness): v1 migration + mark present → green chip, reschedule sheet open →
+  confirm "Solo esta vez" with no console errors; "Ahora" card renders for an in-window
+  appointment and a "Próximo" line for a later one. `node --check app.js` passes.
+
 ## Next step
 
-T2.
+T3.

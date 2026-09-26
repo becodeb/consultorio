@@ -8,6 +8,11 @@
   --pencil: #F4C542;
   --pencil-ink: #3A2E05;
   --danger: #B3413A;
+  --vino-fg: #2E9E6A;
+  --vino-bg: #E3F5EC;
+  --novino-fg: #D0463F;
+  --novino-bg: #FBE8E6;
+  --moved: #6D5BD0;
   --radius-row: 14px;
   --radius-btn: 999px;
   --display: "Bricolage Grotesque", system-ui, sans-serif;
@@ -25,6 +30,11 @@
     --pencil: #E9B930;
     --pencil-ink: #2A2103;
     --danger: #E07A72;
+    --vino-fg: #6FD9A6;
+    --vino-bg: #17301F;
+    --novino-fg: #F29089;
+    --novino-bg: #34181A;
+    --moved: #B4A6F2;
     color-scheme: dark;
   }
 }
@@ -103,21 +113,44 @@ nav.tabs button[aria-selected="true"] { background: var(--ink); color: var(--pap
 .row .amount { font: 700 17px/1 var(--display); font-variant-numeric: tabular-nums; white-space: nowrap; }
 button.row { width: 100%; text-align: left; }
 
-/* Attendance check: highlighter stroke when present */
-.check {
-  width: 48px; height: 48px; flex: none;
-  border-radius: 50%; border: 2px solid var(--line); background: transparent;
-  display: grid; place-items: center;
-  transition: background-color .15s, border-color .15s, transform .15s;
+/* Attendance: explicit Vino / No vino, never a silent toggle */
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.row-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.btn-mark {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); background: var(--surface);
+  border-radius: var(--radius-btn); padding: 8px 12px; font-weight: 700; font-size: 14px;
+  white-space: nowrap;
 }
-.check svg { width: 24px; height: 24px; opacity: 0; transition: opacity .15s; }
-.row.present .check { background: var(--pencil); border-color: var(--pencil); }
-.row.present .check svg { opacity: 1; }
-.row.present .check:active { transform: scale(.92); }
-.row.present .name {
-  background: linear-gradient(transparent 58%, color-mix(in srgb, var(--pencil) 55%, transparent) 58%);
+.btn-mark svg { width: 16px; height: 16px; }
+.btn-mark.vino { color: var(--vino-fg); }
+.btn-mark.novino { color: var(--novino-fg); }
+.btn-mark.big { padding: 14px 18px; font-size: 16px; min-height: 52px; flex: 1; justify-content: center; }
+.chip { border-radius: var(--radius-btn); padding: 6px 12px; font-weight: 700; font-size: 14px; white-space: nowrap; }
+.chip.present { background: var(--vino-bg); color: var(--vino-fg); }
+.chip.absent { background: var(--novino-bg); color: var(--novino-fg); }
+.row.present { background: var(--vino-bg); border-color: color-mix(in srgb, var(--vino-fg) 35%, var(--line)); }
+.row.absent { background: var(--novino-bg); border-color: color-mix(in srgb, var(--novino-fg) 35%, var(--line)); }
+.row.moved { border-style: dashed; }
+.moved-badge { font-size: 13px; color: var(--moved); margin-top: 2px; }
+.icon-btn {
+  border: 0; background: none; color: var(--muted); width: 36px; height: 36px; flex: none;
+  display: grid; place-items: center; border-radius: 50%;
 }
-.row.present .time { color: var(--ink); }
+.icon-btn svg { width: 18px; height: 18px; }
+.btn.small { padding: 6px 10px; font-size: 14px; }
+.next-line { color: var(--muted); margin: -8px 4px 16px; font-size: 15px; }
+.now-card {
+  background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--pencil);
+  border-radius: 18px; padding: 16px; margin-bottom: 20px;
+}
+.now-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.now-name { font: 700 20px/1.2 var(--display); flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.now-time { font: 700 17px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--muted); }
+.now-actions { display: flex; gap: 10px; margin-bottom: 10px; }
+.settings-line { margin-top: 28px; color: var(--muted); font-size: 14px; }
+.settings-line input { width: 80px; display: inline-block; min-height: 38px; margin-left: 8px; }
+label.inline { display: flex; align-items: center; font-weight: 400; }
 
 .day-total {
   display: flex; justify-content: space-between; align-items: baseline;

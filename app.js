@@ -11,6 +11,8 @@ const DEFAULT_SESSION_MINUTES = 45;
 const PREV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>';
 const NEXT = PREV.replace('M15 5l-7 7 7 7', 'M9 5l7 7-7 7');
 const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>';
+const XICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const KEBAB = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
 
 /* ============================================================
    Pure data-model helpers (T1). No DOM access below this block.
@@ -223,6 +225,70 @@ function render() {
   ({ hoy: renderHoy, pacientes: renderPacientes, cuentas: renderCuentas })[state.view]();
 }
 
+/** Ongoing session (within [start, start+sessionMinutes)), or one still unmarked up to
+ *  15 minutes after it ended, or otherwise the next appointment still to come today. */
+function currentOrNextAppointment(db, isoDate, now) {
+  const appts = appointmentsOn(db, isoDate).filter(a => findPatient(db, a.patientId) && a.time);
+  const mins = (db.settings && db.settings.sessionMinutes) || DEFAULT_SESSION_MINUTES;
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  for (const a of appts) {
+    const start = timeToMinutes(a.time);
+    const end = start + mins;
+    if (nowMin >= start && nowMin < end) return Object.assign({}, a, { phase: 'ongoing' });
+    if (nowMin >= end && nowMin < end + 15 && !a.status) return Object.assign({}, a, { phase: 'grace' });
+  }
+  const upcoming = appts
+    .filter(a => timeToMinutes(a.time) > nowMin)
+    .sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+  return upcoming.length ? Object.assign({}, upcoming[0], { phase: 'next' }) : null;
+}
+
+function nowCardHtml() {
+  if (iso(state.day) !== iso(new Date())) return '';
+  const info = currentOrNextAppointment(db, iso(state.day), new Date());
+  if (!info) return '';
+  const p = findPatient(db, info.patientId);
+  if (!p) return '';
+  if (info.phase === 'next') {
+    return `<div class="next-line">Próximo: ${esc(p.name)} ${info.time}</div>`;
+  }
+  return `<div class="now-card">
+    <div class="now-head">
+      <span class="dot" style="background:${p.color}"></span>
+      <span class="now-name">${esc(p.name)}</span>
+      <span class="now-time">${info.time}</span>
+    </div>
+    <div class="now-actions">
+      <button class="btn-mark big vino" data-act="mark" data-status="present" data-id="${p.id}" data-time="${info.time}">${CHECK}Vino</button>
+      <button class="btn-mark big novino" data-act="mark" data-status="absent" data-id="${p.id}" data-time="${info.time}">${XICON}No vino</button>
+    </div>
+    <button class="btn ghost" data-act="reprogramar" data-id="${p.id}" data-time="${info.time}">Reprogramar</button>
+  </div>`;
+}
+
+function apptRowHtml(a) {
+  const p = findPatient(db, a.patientId);
+  if (!p) return '';
+  const status = a.status;
+  const rowClass = status === 'present' ? 'present' : status === 'absent' ? 'absent' : '';
+  const movedBadge = a.moved
+    ? `<div class="moved-badge">reprogramado · antes: ${DAY_SHORT[weekdayOf(a.moved.fromDate)]} ${a.moved.fromTime}</div>`
+    : '';
+  const actionsHtml = !status
+    ? `<button class="btn-mark vino" data-act="mark" data-status="present" data-id="${p.id}" data-time="${a.time}">${CHECK}Vino</button>
+       <button class="btn-mark novino" data-act="mark" data-status="absent" data-id="${p.id}" data-time="${a.time}">${XICON}No vino</button>`
+    : `<span class="chip ${status}">${status === 'present' ? 'Vino' : 'No vino'}</span>
+       <button class="btn ghost small" data-act="undo" data-id="${p.id}" data-time="${a.time}">Deshacer</button>`;
+  return `<li class="row ${rowClass} ${a.moved ? 'moved' : ''}">
+    <span class="dot" style="background:${p.color}"></span>
+    <span class="time">${a.time || '—'}</span>
+    <span class="who"><span class="name">${esc(p.name)}</span>
+      <div class="sub">${moneyFmt(p.price)}</div>${movedBadge}</span>
+    <div class="row-actions">${actionsHtml}</div>
+    <button class="icon-btn" data-act="reprogramar" data-id="${p.id}" data-time="${a.time}" aria-label="Reprogramar a ${esc(p.name)}">${KEBAB}</button>
+  </li>`;
+}
+
 function renderHoy() {
   const d = state.day, date = iso(d), wd = d.getDay();
   const isToday = date === iso(new Date());
@@ -240,32 +306,21 @@ function renderHoy() {
       <h1>${DAYS[wd]} ${d.getDate()}<small>${MONTHS[d.getMonth()]} ${d.getFullYear()}</small></h1>
       <button class="arrow" data-act="day" data-step="1" aria-label="Día siguiente">${NEXT}</button>
     </div>
-    ${isToday ? '' : '<button class="today-link" data-act="today">Volver a hoy</button>'}`;
+    ${isToday ? '' : '<button class="today-link" data-act="today">Volver a hoy</button>'}
+    ${isToday ? `<div id="now-card-slot">${nowCardHtml()}</div>` : ''}`;
 
   if (!db.patients.length) {
     html += `<div class="empty">Todavía no hay pacientes.<br>
       <button class="btn primary" data-act="new">Agregar paciente</button></div>`;
   } else {
     if (appts.length) {
-      html += '<ul class="list">' + appts.map(a => {
-        const p = findPatient(db, a.patientId);
-        const present = a.status === 'present';
-        return `<li class="row ${present ? 'present' : ''}">
-          <span class="time">${a.time || '—'}</span>
-          <span class="who"><span class="name">${esc(p.name)}</span>
-            <div class="sub">${moneyFmt(p.price)}</div></span>
-          <button class="check" data-act="toggle" data-id="${p.id}" data-time="${a.time}"
-            aria-pressed="${present}" aria-label="${present ? 'Quitar presente de' : 'Marcar presente a'} ${esc(p.name)}">${CHECK}</button>
-        </li>`;
-      }).join('') + '</ul>';
+      html += '<ul class="list">' + appts.map(apptRowHtml).join('') + '</ul>';
     } else {
       html += '<div class="empty">Nadie tiene turno este día.</div>';
     }
 
-    if (daySessions.length) {
-      html += `<div class="day-total"><span>${daySessions.length} ${daySessions.length === 1 ? 'sesión' : 'sesiones'}</span>
-        <strong>${moneyFmt(dayTotal)}</strong></div>`;
-    }
+    html += `<div class="day-total"><span>Atendidos ${daySessions.length} de ${appts.length}</span>
+      <strong>${moneyFmt(dayTotal)}</strong></div>`;
 
     if (others.length) {
       html += `<div class="extra">
@@ -279,6 +334,12 @@ function renderHoy() {
   }
   app.innerHTML = html;
 }
+
+setInterval(() => {
+  if (state.view !== 'hoy') return;
+  const slot = document.getElementById('now-card-slot');
+  if (slot) slot.innerHTML = nowCardHtml();
+}, 30000);
 
 function renderPacientes() {
   const active = db.patients.filter(p => p.active).sort(byName);
@@ -310,6 +371,11 @@ function renderPacientes() {
   html += `<div class="backup">
     <button class="btn ghost" data-act="export">Descargar copia</button>
     <button class="btn ghost" data-act="import">Cargar copia</button>
+  </div>
+  <div class="settings-line">
+    <label class="inline">Duración de sesión (minutos)
+      <input type="number" id="session-minutes" min="5" step="5" value="${db.settings.sessionMinutes}">
+    </label>
   </div>`;
   app.innerHTML = html;
 }
@@ -414,16 +480,20 @@ app.addEventListener('click', e => {
   const act = el.dataset.act, id = el.dataset.id;
   const date = iso(state.day);
 
-  if (act === 'toggle') {
-    const time = el.dataset.time || '';
-    const already = appointmentsOn(db, date).find(a => a.patientId === id && a.time === time && a.status === 'present');
-    if (already) unmarkAttendance(db, id, date, time);
-    else markAttendance(db, id, date, time, 'present');
+  if (act === 'mark') {
+    markAttendance(db, id, date, el.dataset.time || '', el.dataset.status);
     save(); render();
+  } else if (act === 'undo') {
+    unmarkAttendance(db, id, date, el.dataset.time || '');
+    save(); render();
+  } else if (act === 'reprogramar') {
+    openReschedule(id, date, el.dataset.time || '');
   } else if (act === 'extra') {
     const pid = document.getElementById('extra-patient').value;
     if (!pid) return;
-    markAttendance(db, pid, date, '', 'present');
+    const time = nowHM(new Date());
+    addExtraOccurrence(db, pid, date, time);
+    markAttendance(db, pid, date, time, 'present');
     save(); render();
   } else if (act === 'day') {
     state.day = addDays(state.day, Number(el.dataset.step));
@@ -470,6 +540,58 @@ document.querySelector('nav.tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-view]');
   if (!b) return;
   state.view = b.dataset.view; render();
+});
+
+app.addEventListener('change', e => {
+  if (e.target.id === 'session-minutes') {
+    const v = Math.max(5, Math.round(Number(e.target.value)) || DEFAULT_SESSION_MINUTES);
+    db.settings.sessionMinutes = v;
+    save();
+  }
+});
+
+/* ---------- reschedule sheet ---------- */
+const reschedule = document.getElementById('reschedule');
+const rescheduleForm = document.getElementById('reschedule-form');
+let rescheduleCtx = null; // { patientId, date, time }
+
+function openReschedule(patientId, date, time) {
+  rescheduleCtx = { patientId, date, time };
+  const p = findPatient(db, patientId);
+  document.getElementById('reschedule-who').textContent =
+    `${p ? p.name : ''} · ${DAY_SHORT[weekdayOf(date)]} ${time || ''}`;
+  document.getElementById('reschedule-once-fields').hidden = true;
+  document.getElementById('reschedule-confirm').hidden = true;
+  rescheduleForm.elements.toDate.value = date;
+  rescheduleForm.elements.toTime.value = time || '';
+  reschedule.showModal();
+}
+
+reschedule.addEventListener('click', e => {
+  const choice = e.target.closest('[data-choice]');
+  if (!choice || !rescheduleCtx) return;
+  if (choice.dataset.choice === 'once') {
+    document.getElementById('reschedule-once-fields').hidden = false;
+    document.getElementById('reschedule-confirm').hidden = false;
+  } else if (choice.dataset.choice === 'cancel') {
+    if (!confirm('¿Cancelar esta sesión?')) return;
+    cancelOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date);
+    save(); reschedule.close(); render(); toast('Sesión cancelada');
+  } else if (choice.dataset.choice === 'fixed') {
+    const p = findPatient(db, rescheduleCtx.patientId);
+    reschedule.close();
+    openEditor(p);
+  }
+});
+document.getElementById('reschedule-cancel').onclick = () => reschedule.close();
+rescheduleForm.addEventListener('submit', e => {
+  e.preventDefault();
+  if (!rescheduleCtx) return;
+  const toDate = rescheduleForm.elements.toDate.value;
+  const toTime = rescheduleForm.elements.toTime.value;
+  if (!ISO_DATE_RE.test(toDate) || !HHMM_RE.test(toTime)) { toast('Fecha u hora inválida'); return; }
+  rescheduleOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date, toDate, toTime);
+  save(); reschedule.close(); render(); toast('Sesión reprogramada');
 });
 
 render();

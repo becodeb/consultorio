@@ -40,6 +40,26 @@
   </form>
 </dialog>
 
+<dialog id="reschedule">
+  <form method="dialog" id="reschedule-form">
+    <h2>Reprogramar</h2>
+    <p class="sub" id="reschedule-who"></p>
+    <div class="dialog-actions" style="flex-direction:column;align-items:stretch;gap:10px;margin-top:0">
+      <button type="button" class="btn wide" data-choice="once">Solo esta vez…</button>
+      <button type="button" class="btn wide" data-choice="cancel">Cancelar esta sesión</button>
+      <button type="button" class="btn wide ghost" data-choice="fixed">Cambiar horario fijo</button>
+    </div>
+    <div id="reschedule-once-fields" hidden style="margin-top:16px">
+      <label>Nueva fecha <input type="date" name="toDate"></label>
+      <label>Nueva hora <input type="time" name="toTime"></label>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn ghost" id="reschedule-cancel">Cerrar</button>
+      <button type="submit" class="btn primary" id="reschedule-confirm" hidden>Confirmar</button>
+    </div>
+  </form>
+</dialog>
+
 <input type="file" id="import-file" accept="application/json" hidden>
 <div class="toast" id="toast" role="status"></div>
 
