@@ -7,8 +7,10 @@
  *
  * Env vars: PORT (default 8811), HOST (default 0.0.0.0), DATA_DIR (default ./data),
  * INSECURE_COOKIES (set to "1" to allow a non-Secure session cookie over plain HTTP,
- * for local dev / e2e only — see the cookie section below), LLM_BASE_URL, LLM_API_KEY,
- * LLM_MODEL, optional LLM_EXTRA_HEADERS (JSON object merged into the LLM request headers).
+ * for local dev / e2e only — see the cookie section below), AI_ROUTER_URL (default
+ * https://ai-router.becode.com.ar), optional AI_ROUTER_MODEL (pin a model instead of the
+ * free-provider cascade) and AI_ROUTER_TOKEN (only sent, as a bearer token, when set —
+ * required for a paid pinned model such as deepseek-chat).
  */
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -33,15 +35,9 @@ const PORT = Number(process.env.PORT) || 8811;
 const HOST = process.env.HOST || '0.0.0.0';
 const DATA_DIR = process.env.DATA_DIR || './data';
 const INSECURE_COOKIES = process.env.INSECURE_COOKIES === '1';
-const LLM_BASE_URL = process.env.LLM_BASE_URL || '';
-const LLM_API_KEY = process.env.LLM_API_KEY || '';
-const LLM_MODEL = process.env.LLM_MODEL || '';
-let LLM_EXTRA_HEADERS = {};
-try {
-  if (process.env.LLM_EXTRA_HEADERS) LLM_EXTRA_HEADERS = JSON.parse(process.env.LLM_EXTRA_HEADERS);
-} catch {
-  console.error('LLM_EXTRA_HEADERS is not valid JSON, ignoring it');
-}
+const AI_ROUTER_URL = process.env.AI_ROUTER_URL || 'https://ai-router.becode.com.ar';
+const AI_ROUTER_MODEL = process.env.AI_ROUTER_MODEL || '';
+const AI_ROUTER_TOKEN = process.env.AI_ROUTER_TOKEN || '';
 
 /* ============================================================
    Storage: node:sqlite, one file under DATA_DIR
@@ -438,45 +434,87 @@ Reply with ONLY one JSON object, no prose, no markdown fences: {"actions": [...]
 Use exact "id" values from context.patients for patientId; never invent one. add_patient is the only action type without a patientId. If she names several patients at once ("vinieron Joaquín y Tomás"), return one mark_attendance action per patient.`;
 }
 
-async function callLlm(text, context) {
-  if (!LLM_BASE_URL || !LLM_API_KEY || !LLM_MODEL) {
-    throw Object.assign(new Error('LLM not configured'), { code: 'NOT_CONFIGURED' });
+/**
+ * Extracts the raw token text from an ai-router SSE body. Events look like
+ * "data: token1\n\ndata: token2\n\ndata: [DONE]\n\n" — split on the blank-line-plus-prefix
+ * (not on blank lines alone, since a token can itself contain one), strip the "data: "
+ * prefix only where the split left it (the very first chunk), and never trim a token:
+ * a token that starts with a space arrives as "data: " (with the space already part of
+ * the prefix) followed by the token's own leading space, so byte-position stripping
+ * (exactly 6 chars) is required, not a trim.
+ */
+function parseAiRouterSse(rawText) {
+  const parts = String(rawText).split('\n\ndata: ');
+  let out = '';
+  for (let i = 0; i < parts.length; i++) {
+    let part = parts[i];
+    if (i === 0 && part.startsWith('data: ')) part = part.slice(6);
+    if (part.trimEnd() === '[DONE]') break;
+    out += part;
   }
+  return out;
+}
+
+/** One POST /chat call. Throws on total failure (the router already cascaded every free
+ *  provider, so this is not retried) — never on a merely unparsable JSON reply. */
+async function fetchAiRouterOnce(messages) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const res = await fetch(`${LLM_BASE_URL.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: Object.assign(
-        { 'content-type': 'application/json', authorization: `Bearer ${LLM_API_KEY}` },
-        LLM_EXTRA_HEADERS,
-      ),
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: systemPrompt() },
-          { role: 'user', content: JSON.stringify({ text, context }) },
-        ],
-      }),
-      signal: controller.signal,
+    const body = { messages };
+    if (AI_ROUTER_MODEL) body.model = AI_ROUTER_MODEL;
+    const headers = { 'content-type': 'application/json' };
+    if (AI_ROUTER_TOKEN) headers.authorization = `Bearer ${AI_ROUTER_TOKEN}`;
+    const res = await fetch(`${AI_ROUTER_URL.replace(/\/+$/, '')}/chat`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal,
     });
-    if (!res.ok) {
-      throw Object.assign(new Error(`LLM upstream error ${res.status}`), { code: 'UPSTREAM', status: res.status });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('text/event-stream')) {
+      // Total failure: the router answers 502 JSON, but behind Cloudflare a 502 body is
+      // replaced by Cloudflare's own plain-text error page (content-type: text/plain).
+      let message = `ai-router upstream error ${res.status}`;
+      if (contentType.includes('application/json')) {
+        try { const errBody = await res.json(); if (errBody && errBody.error) message = errBody.error; } catch { /* fall through */ }
+      } else {
+        try { message = (await res.text()).slice(0, 300) || message; } catch { /* fall through */ }
+      }
+      throw Object.assign(new Error(message), { code: 'UPSTREAM', status: res.status });
     }
-    const data = await res.json();
-    const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-    if (!content) throw Object.assign(new Error('Empty LLM response'), { code: 'EMPTY' });
-    const parsed = extractJsonObject(content);
-    if (!parsed) throw Object.assign(new Error('Could not parse LLM JSON'), { code: 'PARSE' });
-    return {
-      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
-      reply: typeof parsed.reply === 'string' ? parsed.reply : '',
-    };
+    return parseAiRouterSse(await res.text());
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function callLlm(text, context) {
+  if (!AI_ROUTER_URL) throw Object.assign(new Error('ai-router not configured'), { code: 'NOT_CONFIGURED' });
+
+  const messages = [
+    { role: 'system', content: systemPrompt() },
+    { role: 'user', content: JSON.stringify({ text, context }) },
+  ];
+
+  // max_tokens / response_format are ignored by the router, so neither is sent. The model
+  // sometimes wraps its JSON in prose or ```json fences; extractJsonObject is tolerant of
+  // that, and one corrective retry (not a transport retry — the router already cascaded
+  // every free provider for us) covers the rest.
+  let lastRaw = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const raw = await fetchAiRouterOnce(attempt === 0 ? messages : [
+      ...messages,
+      { role: 'assistant', content: lastRaw },
+      { role: 'user', content: 'Eso no era JSON válido. Respondé ÚNICAMENTE con el objeto JSON {"actions":[...],"reply":"..."}, sin texto ni cercas de código.' },
+    ]);
+    lastRaw = raw;
+    const parsed = extractJsonObject(raw);
+    if (parsed) {
+      return {
+        actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+        reply: typeof parsed.reply === 'string' ? parsed.reply : '',
+      };
+    }
+  }
+  throw Object.assign(new Error('Could not parse ai-router JSON after retry'), { code: 'PARSE' });
 }
 
 async function handleVoice(req, res) {
@@ -539,9 +577,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`consultorio server listening on http://${HOST}:${PORT} (data: ${DATA_DIR})`);
-  if (!LLM_BASE_URL || !LLM_API_KEY || !LLM_MODEL) {
-    console.log('voice assistant: LLM not configured (set LLM_BASE_URL, LLM_API_KEY, LLM_MODEL) — /api/voice will return 503');
-  }
+  console.log(`voice assistant: ai-router at ${AI_ROUTER_URL}${AI_ROUTER_MODEL ? ` (pinned model: ${AI_ROUTER_MODEL})` : ' (free-provider cascade)'}`);
   if (INSECURE_COOKIES) {
     console.log('INSECURE_COOKIES=1: session cookie will be sent without Secure over plain HTTP — dev/e2e only');
   }

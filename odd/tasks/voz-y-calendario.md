@@ -75,7 +75,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
       existing local data on first login.
 - [x] T8 Payments: data + Cuentas UI (owed / paid / balance per patient, register payment
       prefilled with the owed amount) + voice action `record_payment`.
-- [ ] T9 AI via ai-router (SSE parsing, tolerant JSON extraction, one retry on bad JSON);
+- [x] T9 AI via ai-router (SSE parsing, tolerant JSON extraction, one retry on bad JSON);
       send only first name + surname initial to the model.
 - [ ] T10 Polish (Ahora card actions, Semana overlaps) + e2e/screenshots updated.
 - [ ] T11 Dockerfile + docker-compose.yml, GitHub repo, Coolify app, domain, live checks.
@@ -353,6 +353,60 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   (confirmed the math traces through insertion order for same-date payments, not a bug).
   No console errors in any of the runs.
 
+- T9 (commit pending): replaced the OpenAI-compatible `/chat/completions` client with an
+  `ai-router` client (`AI_ROUTER_URL`, optional `AI_ROUTER_MODEL`/`AI_ROUTER_TOKEN`; all
+  `LLM_*` env vars removed, module comment and `README.md` updated). Verified the exact
+  wire format against the live router before writing the parser (`curl` with `cat -A`):
+  `data: <token>\n\n` per chunk, ending `data: [DONE]\n\n`. `parseAiRouterSse` splits on
+  `\n\ndata: ` (not on blank lines alone — a token could contain one), strips the `data: `
+  prefix only from the first chunk by exact 6-char slice (never trimmed, so a token with a
+  genuine leading space survives), and stops at a `[DONE]` sentinel (`trimEnd()`-compared,
+  since the final chunk carries the stream's closing blank line). Total failure is detected
+  by `content-type` (only `text/event-stream` is success), not `res.ok` alone, and a
+  non-JSON failure body (Cloudflare's own error page behind the CDN) falls back to a
+  truncated text snippet instead of crashing on `.json()`. `max_tokens`/`response_format`
+  are no longer sent (the router ignores both). One corrective retry on unparsable JSON
+  appends the bad output plus a "that wasn't valid JSON" follow-up message and asks again —
+  a transport/total failure is never retried, since the router already cascaded every free
+  provider itself. `/api/voice` still requires a session (unchanged from T7).
+
+  Privacy: `buildVoiceContext` now sends `shortName(patient.name)` ("Martina López" →
+  "Martina L.") instead of the full name — patients are children and the free cascade
+  goes to third-party providers. `patientId` is untouched, so every action the app applies
+  still resolves to the real patient via local `db` (full names were already used there,
+  no change needed). The model's own free-text `reply` can still surface a short name, so
+  `deanonymizeReply` replaces each patient's short name with their full name client-side
+  before it's displayed. `server.mjs`'s system prompt documents `record_payment` and
+  balance-aware replies (content carried over from T8, now served through the new client).
+
+  Checks: `node --check app.js server.mjs` pass. Unit-checked `parseAiRouterSse` inline
+  against three cases (plain token, JSON payload, a token split across chunks with a
+  genuine leading space) — all correct. `curl` through the live router confirmed the SSE
+  framing assumptions before coding, and confirmed the total-failure JSON shape separately
+  via the documented example.
+
+  **Real ai-router test**, 10 calls through the full app (`POST /api/voice`, authenticated,
+  no model pinned — free cascade), covering the exact list asked for:
+
+  | # | Command | Result | Latency |
+  |---|---|---|---|
+  | 1 | "hoy vino Martina" | no action; asked whether to add it as an extra session (Martina's schedule is Mon/Thu, "today" in the test context was Sunday — a defensible read, not a hallucination, though more conservative than the client's own validation requires) | 727ms |
+  | 2 | "Sofía no vino" | correct `mark_attendance` absent, correct upcoming Tuesday | 915ms |
+  | 3 | "esta semana Joaquín viene el jueves a las seis de la tarde en vez del martes" | correct `reschedule_once`, this week's Tue→Thu 18:00 | 1.44s |
+  | 4 | "agregá a Lucía Gómez, quince mil, lunes y miércoles a las cinco" | correct `add_patient`, 15000, Mon+Wed 17:00 | 1.57s |
+  | 5 | "Martina me pagó" | correct `record_payment`, `amount:null` | 1.59s |
+  | 6 | "Joaquín pagó lo de hoy" | correct `record_payment`, `amount:20000` (today's session price, not null) | 867ms |
+  | 7 | "Sofía me pagó el mes" | correct `record_payment`, `amount:null` | 749ms |
+  | 8 | "¿cuánto me debe Tomás?" | no action (correct), reply correctly reports Tomás's credit from `balance:-5000` | 1.31s |
+  | 9 | "¿quién me debe?" | no action (correct), reply correctly lists both debtors with amounts from context | 1.71s |
+  | 10 | "¿cuánto llevo este mes?" | no action (correct), reply matches `monthTotals` | 1.61s |
+
+  9/10 fully correct, 1 defensible-but-conservative non-action. `GET /providers` showed
+  the cascade actually failing over mid-battery — Groq (the fastest, `speedRank:1`) hit
+  its free-tier cooldown partway through this burst and `google`/`gemini-3.5-flash-lite`
+  took over as preferred — every answer stayed correct through that handoff, which is a
+  real (not simulated) exercise of the router's own failover.
+
 ## Next step
 
-T9.
+T10.

@@ -163,6 +163,25 @@ function findOccurrence(db, patientId, isoDate) {
 }
 
 /** Builds the JSON context sent to /api/voice alongside the spoken/typed text. */
+/** "Martina López" -> "Martina L." — patients are children, so only a first name + surname
+ *  initial goes to the (partly third-party, free-tier) LLM, never a full name. */
+function shortName(name) {
+  const parts = String(name).trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return parts[0] || '';
+  return `${parts[0]} ${parts[parts.length - 1][0]}.`;
+}
+
+/** Replaces any short names (as sent to the LLM) found in its reply with the matching
+ *  patient's full name, so what she reads always uses the name she actually typed in. */
+function deanonymizeReply(db, reply) {
+  let out = String(reply || '');
+  for (const p of db.patients) {
+    const short = shortName(p.name);
+    if (short) out = out.split(short).join(p.name);
+  }
+  return out;
+}
+
 function buildVoiceContext(db) {
   const today = new Date();
   const todayIso = iso(today);
@@ -172,7 +191,7 @@ function buildVoiceContext(db) {
   for (let i = 1; i <= 7; i++) { const d = addDays(today, -i); prev7Days.push(`${iso(d)} ${DAYS[d.getDay()]}`); }
 
   const patients = db.patients.map(p => ({
-    id: p.id, name: p.name, price: p.price, schedule: p.schedule, active: p.active, balance: balanceOf(db, p.id),
+    id: p.id, name: shortName(p.name), price: p.price, schedule: p.schedule, active: p.active, balance: balanceOf(db, p.id),
   }));
 
   const weekStart = mondayOf(today);
@@ -1291,7 +1310,7 @@ async function submitVoiceText(text) {
 
 function applyVoiceResult(data) {
   const actions = Array.isArray(data.actions) ? data.actions : [];
-  const reply = typeof data.reply === 'string' ? data.reply : '';
+  const reply = deanonymizeReply(db, typeof data.reply === 'string' ? data.reply : '');
   const done = [];
   const failed = [];
   const snapshot = JSON.parse(JSON.stringify(db));

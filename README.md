@@ -2,17 +2,15 @@
 
 Static page (`index.html` + `styles.css` + `app.js`, no build step) plus a zero-dependency
 Node server (`server.mjs`, `node:sqlite` for storage) that serves the files, an
-email+password account per psicopedagoga, and proxies `POST /api/voice` to an
-OpenAI-compatible LLM.
+email+password account per psicopedagoga, and proxies `POST /api/voice` to
+[ai-router](https://github.com/ezemastro/ai-router) (`ezemastro/ai-router`), an
+in-house latency-aware proxy that fans a chat request out over several free LLM
+providers and fails over between them.
 
 ## Run
 
 ```sh
-DATA_DIR=./data \
-LLM_BASE_URL=https://api.deepseek.com/v1 \
-LLM_API_KEY=your-key \
-LLM_MODEL=deepseek-chat \
-node server.mjs
+DATA_DIR=./data node server.mjs
 ```
 
 Env vars:
@@ -27,14 +25,16 @@ Env vars:
   the `__Host-` cookie is used. The server only relaxes it when the request itself isn't
   HTTPS (checked via `x-forwarded-proto`), so setting this in production is a no-op behind
   a TLS-terminating proxy but still don't do it.
-- `LLM_BASE_URL` — OpenAI-compatible base URL (the server appends `/chat/completions`).
-- `LLM_API_KEY` — bearer token for that API. Never logged, never committed.
-- `LLM_MODEL` — model id.
-- `LLM_EXTRA_HEADERS` — optional JSON object merged into the LLM request headers (some
-  providers need a custom session or user-agent header).
+- `AI_ROUTER_URL` — base URL of the router. Default `https://ai-router.becode.com.ar`.
+- `AI_ROUTER_MODEL` — optional. Pins a specific model (e.g. `deepseek-chat`) instead of
+  the default free-provider cascade (fastest healthy provider first, with failover).
+- `AI_ROUTER_TOKEN` — optional bearer token, only sent when set. Required for a pinned
+  paid model (currently only `deepseek-chat`); free models need no token at all.
 
-Without `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` the app works fully except the voice
-assistant, which returns `503`.
+The voice assistant always works as long as `AI_ROUTER_URL` is reachable — the free
+cascade needs no key. Patients are children: the context sent to the model identifies
+each one by id + first name + surname initial ("Martina L."), never a full name; the
+reply is mapped back to full names before she sees it.
 
 ## Microphone
 
