@@ -47,7 +47,7 @@ second tap (not intuitive), no absences, no one-off schedule changes, no calenda
       changes (move / cancel / extra); attendance with `present` | `absent` and frozen price.
 - [x] T2 Today view redesign: pre-filled list, Vino (green) / No vino (red) / Reprogramar,
       undo, "now" card, reschedule sheet.
-- [ ] T3 Week calendar + month calendar views.
+- [x] T3 Week calendar + month calendar views.
 - [ ] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
       action validation + apply + undo.
 - [ ] T5 Visual polish across all views, bottom navigation.
@@ -93,6 +93,19 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   confirm "Solo esta vez" with no console errors; "Ahora" card renders for an in-window
   appointment and a "Próximo" line for a later one. `node --check app.js` passes.
 
+- T3 (commit pending): added "Semana" and "Mes" tabs. `renderSemana` builds a Mon–Sat
+  time grid (Sunday column only added when it has appointments) from `appointmentsOn`
+  per day, hour range auto-expanded to cover the day's earliest/latest appointment (base
+  08:00–20:00), blocks positioned by CSS `top`/`height` in a `position:relative` column
+  per day, tinted by `patient.color`, dashed when moved, first name truncated. `renderMes`
+  builds a Mon-first grid (`mondayOf`/`addDays`, always complete weeks) with up to 4
+  colored dots + "+n" per day, today outlined, days where every appointment is marked
+  tinted, tapping any day/block jumps to Hoy on that date (`openday` action). Smoke-tested
+  with Playwright/Chromium at 390×844: 3 week blocks / 35 month cells / 15 month dots
+  rendered correctly for a 6-patient seed, no console errors, tap-to-Hoy verified; visual
+  screenshots at 390px show both grids fit without horizontal overflow (name truncation
+  is intentionally tight — refined further in T5). `node --check app.js` passes.
+
 ## Next step
 
-T3.
+T4.

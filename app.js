@@ -23,6 +23,10 @@ function moneyFmt(n) { return '$' + money.format(Math.round(n || 0)); }
 function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
 function firstOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
 function addDays(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+function mondayOf(d) {
+  const day = d.getDay(); // 0=Sun..6=Sat
+  return addDays(startOfDay(d), day === 0 ? -6 : 1 - day);
+}
 function iso(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
@@ -191,7 +195,13 @@ function nextColor(db) { return PALETTE[db.patients.length % PALETTE.length]; }
    ============================================================ */
 
 const app = document.getElementById('app');
-const state = { view: 'hoy', day: startOfDay(new Date()), month: firstOfMonth(new Date()), editing: null };
+const state = {
+  view: 'hoy',
+  day: startOfDay(new Date()),
+  week: mondayOf(new Date()),
+  month: firstOfMonth(new Date()),
+  editing: null,
+};
 let db = load();
 
 function load() {
@@ -222,7 +232,7 @@ function scheduleText(p) {
 function render() {
   document.querySelectorAll('nav.tabs button').forEach(b =>
     b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
-  ({ hoy: renderHoy, pacientes: renderPacientes, cuentas: renderCuentas })[state.view]();
+  ({ hoy: renderHoy, semana: renderSemana, mes: renderMes, pacientes: renderPacientes, cuentas: renderCuentas })[state.view]();
 }
 
 /** Ongoing session (within [start, start+sessionMinutes)), or one still unmarked up to
@@ -340,6 +350,104 @@ setInterval(() => {
   const slot = document.getElementById('now-card-slot');
   if (slot) slot.innerHTML = nowCardHtml();
 }, 30000);
+
+function renderSemana() {
+  const monday = state.week;
+  const days = [0, 1, 2, 3, 4, 5].map(i => addDays(monday, i));
+  const sunday = addDays(monday, 6);
+  const sundayHasAppts = appointmentsOn(db, iso(sunday)).some(a => findPatient(db, a.patientId));
+  if (sundayHasAppts) days.push(sunday);
+
+  const todayIso = iso(new Date());
+  const perDay = days.map(d => appointmentsOn(db, iso(d)).filter(a => findPatient(db, a.patientId)));
+  const sessionMin = (db.settings && db.settings.sessionMinutes) || DEFAULT_SESSION_MINUTES;
+
+  let minMin = 8 * 60, maxMin = 20 * 60;
+  perDay.flat().forEach(a => {
+    const start = timeToMinutes(a.time);
+    minMin = Math.min(minMin, start);
+    maxMin = Math.max(maxMin, start + sessionMin);
+  });
+  minMin = Math.floor(minMin / 60) * 60;
+  maxMin = Math.ceil(maxMin / 60) * 60;
+  const totalMin = maxMin - minMin;
+  const hours = [];
+  for (let m = minMin; m <= maxMin; m += 60) hours.push(m);
+
+  const isCurrentWeek = iso(monday) === iso(mondayOf(new Date()));
+
+  let html = `
+    <div class="period">
+      <button class="arrow" data-act="week" data-step="-1" aria-label="Semana anterior">${PREV}</button>
+      <h1>Semana<small>${monday.getDate()} ${MONTHS[monday.getMonth()]} – ${days[days.length - 1].getDate()} ${MONTHS[days[days.length - 1].getMonth()]}</small></h1>
+      <button class="arrow" data-act="week" data-step="1" aria-label="Semana siguiente">${NEXT}</button>
+    </div>
+    ${isCurrentWeek ? '' : '<button class="today-link" data-act="thisweek">Esta semana</button>'}`;
+
+  html += `<div class="week-grid" style="grid-template-columns:34px repeat(${days.length},1fr)">
+    <div class="week-corner"></div>
+    ${days.map(d => `<div class="week-daylabel ${iso(d) === todayIso ? 'is-today' : ''}">${DAY_SHORT[d.getDay()]}<br>${d.getDate()}</div>`).join('')}
+    <div class="week-axis" style="height:${totalMin}px">
+      ${hours.map(m => `<div class="hour-label" style="top:${m - minMin}px">${String(Math.floor(m / 60)).padStart(2, '0')}</div>`).join('')}
+    </div>
+    ${days.map((d, i) => `<div class="week-col" style="height:${totalMin}px">
+      ${hours.map(m => `<div class="hour-line" style="top:${m - minMin}px"></div>`).join('')}
+      ${perDay[i].map(a => {
+        const p = findPatient(db, a.patientId);
+        const top = timeToMinutes(a.time) - minMin;
+        const cls = a.status === 'present' ? 'present' : a.status === 'absent' ? 'absent' : '';
+        return `<button class="week-block ${cls} ${a.moved ? 'moved' : ''}" data-act="openday" data-date="${iso(d)}"
+          style="top:${top}px;height:${sessionMin - 2}px;background:color-mix(in srgb, ${p.color} 22%, var(--surface));border-color:${p.color}"
+          aria-label="${esc(p.name)} ${a.time}">${esc(p.name.split(' ')[0])}</button>`;
+      }).join('')}
+    </div>`).join('')}
+  </div>`;
+
+  app.innerHTML = html;
+}
+
+function renderMes() {
+  const m = state.month;
+  const first = firstOfMonth(m);
+  const lastOfMonth = new Date(m.getFullYear(), m.getMonth() + 1, 0);
+  const startGrid = mondayOf(first);
+  const endGrid = addDays(mondayOf(lastOfMonth), 6);
+  const days = [];
+  for (let c = startGrid; c <= endGrid; c = addDays(c, 1)) days.push(c);
+
+  const todayIso = iso(new Date());
+  const isCurrentMonth = m.getFullYear() === new Date().getFullYear() && m.getMonth() === new Date().getMonth();
+
+  let html = `
+    <div class="period">
+      <button class="arrow" data-act="month" data-step="-1" aria-label="Mes anterior">${PREV}</button>
+      <h1 style="text-transform:capitalize">${MONTHS[m.getMonth()]}<small>${m.getFullYear()}</small></h1>
+      <button class="arrow" data-act="month" data-step="1" aria-label="Mes siguiente">${NEXT}</button>
+    </div>
+    ${isCurrentMonth ? '' : '<button class="today-link" data-act="thismonth">Este mes</button>'}
+    <div class="month-weekdays">${DAY_SHORT.slice(1).concat(DAY_SHORT[0]).map(l => `<div>${l[0]}</div>`).join('')}</div>
+    <div class="month-grid">`;
+
+  html += days.map(d => {
+    const dISO = iso(d);
+    const appts = appointmentsOn(db, dISO).filter(a => findPatient(db, a.patientId));
+    const dots = appts.slice(0, 4);
+    const extra = appts.length > 4 ? appts.length - 4 : 0;
+    const allDone = appts.length > 0 && appts.every(a => a.status);
+    const cls = [
+      d.getMonth() !== m.getMonth() ? 'dim' : '',
+      dISO === todayIso ? 'is-today' : '',
+      allDone ? 'all-done' : '',
+    ].filter(Boolean).join(' ');
+    return `<button class="month-cell ${cls}" data-act="openday" data-date="${dISO}">
+      <span class="month-daynum">${d.getDate()}</span>
+      ${appts.length ? `<span class="month-dots">${dots.map(a => `<span class="dot" style="background:${findPatient(db, a.patientId).color}"></span>`).join('')}${extra ? `<span class="month-more">+${extra}</span>` : ''}</span>` : ''}
+    </button>`;
+  }).join('');
+
+  html += '</div>';
+  app.innerHTML = html;
+}
 
 function renderPacientes() {
   const active = db.patients.filter(p => p.active).sort(byName);
@@ -500,8 +608,19 @@ app.addEventListener('click', e => {
     render();
   } else if (act === 'today') {
     state.day = startOfDay(new Date()); render();
+  } else if (act === 'week') {
+    state.week = addDays(state.week, 7 * Number(el.dataset.step));
+    render();
+  } else if (act === 'thisweek') {
+    state.week = mondayOf(new Date()); render();
   } else if (act === 'month') {
     state.month = new Date(state.month.getFullYear(), state.month.getMonth() + Number(el.dataset.step), 1);
+    render();
+  } else if (act === 'thismonth') {
+    state.month = firstOfMonth(new Date()); render();
+  } else if (act === 'openday') {
+    state.day = dateFromIso(el.dataset.date);
+    state.view = 'hoy';
     render();
   } else if (act === 'new') {
     openEditor(null);
