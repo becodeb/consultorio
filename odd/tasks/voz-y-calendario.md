@@ -1,0 +1,74 @@
+# Feature: voice assistant, rescheduling and calendars
+
+Locator: `odd/tasks/voz-y-calendario.md` (Engram mirror: `odd/voz-y-calendario/tasks` — PENDING: engram returns ambiguous_project and does not list `consultorio` yet)
+
+## Objective
+
+A psicopedagoga sees several patients per day (some twice a week). She must be able to run
+the whole day from the phone: see who is coming, mark who came / didn't come, reschedule a
+single occurrence, check the week and the month, and do all of it by voice too.
+
+## Problem
+
+v1 (commit 2d9f507) only has a daily list with a yellow toggle that silently un-marks on a
+second tap (not intuitive), no absences, no one-off schedule changes, no calendar, no voice.
+
+## Scope (authorized by the user on 2026-09-26)
+
+- Voice: microphone button; she speaks ("hoy vino Martina", "esta semana Joaquín viene el
+  jueves a las 18", "agregá a Lucía, 15 mil, lunes y miércoles a las 17") and an AI turns it
+  into actions that are applied, with undo. Everything must be doable by voice.
+- One-off changes: move one occurrence to another day/time, cancel one occurrence, add an
+  extra session. Permanent schedule changes stay in the patient editor.
+- Today view: the day's list is pre-filled from schedules; each row has explicit
+  "Vino" (turns green) and "No vino" (turns red) actions plus "Reprogramar".
+- "Now" card: during a session's time window, the current patient appears on top to mark.
+- Week calendar view and month calendar view.
+- Visual redesign ("más lindo").
+- Playwright screenshots of the result.
+
+## Constraints
+
+- No build step. Static front (index.html + css + js) plus a zero-dependency Node server
+  (`server.mjs`) that serves the files and proxies `/api/voice` to an OpenAI-compatible LLM.
+- API keys only via environment variables, never committed.
+- Data stays in the browser (localStorage) with JSON backup; v1 data must migrate.
+- Microphone (Web Speech API) needs a secure context: works on localhost/HTTPS, not on
+  `http://192.168.x.x`. Text input fallback in the voice sheet.
+- UI copy in Spanish (neutral), code in English.
+- TDD: off (source: no project config, no test runner). Checks: Playwright e2e script with
+  system Chromium (`/usr/bin/chromium`, `NODE_PATH=/tmp/pw/node_modules`).
+- RDD: off (global, decided by the user 2026-09-23).
+- Delivery: local repo only, no remote; no PR.
+
+## Tasks
+
+- [ ] T1 Data model v2 + migration: appointments computed from weekly schedule + one-off
+      changes (move / cancel / extra); attendance with `present` | `absent` and frozen price.
+- [ ] T2 Today view redesign: pre-filled list, Vino (green) / No vino (red) / Reprogramar,
+      undo, "now" card, reschedule sheet.
+- [ ] T3 Week calendar + month calendar views.
+- [ ] T4 Voice: mic sheet (Web Speech API es-AR + text fallback), `server.mjs` LLM proxy,
+      action validation + apply + undo.
+- [ ] T5 Visual polish across all views, bottom navigation.
+- [ ] T6 Playwright e2e + screenshots (390×844).
+
+Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
+
+## Acceptance criteria
+
+- Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
+- A moved occurrence disappears from its original day and appears on the new one, in Today,
+  Week and Month; the patient's fixed schedule is unchanged.
+- Accounts count only `present` sessions at the price frozen when marked.
+- Voice/text command "hoy vino X" marks X present today; a reschedule command moves only
+  that week's occurrence.
+- v1 localStorage data loads without loss.
+
+## Progress / evidence
+
+(filled per task)
+
+## Next step
+
+T1.
