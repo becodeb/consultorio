@@ -183,7 +183,8 @@ function makeLimiter(limit, windowMs) {
   };
 }
 const voiceLimiter = makeLimiter(30, 60_000);
-const authLimiter = makeLimiter(30, 60_000);
+// Kept strict in production; the e2e suite raises it via env for its own signups.
+const authLimiter = makeLimiter(Number(process.env.AUTH_RATE_LIMIT) || 10, 60_000);
 const generalLimiter = makeLimiter(300, 60_000);
 
 function clientIp(req) { return req.socket.remoteAddress || 'unknown'; }

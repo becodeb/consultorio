@@ -796,7 +796,7 @@ async function main() {
 
   const port = await getFreePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'consultorio-e2e-'));
-  const env = { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, INSECURE_COOKIES: '1' };
+  const env = { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, INSECURE_COOKIES: '1', AUTH_RATE_LIMIT: '100' };
   const origin = `http://127.0.0.1:${port}`;
 
   const serverProc = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
