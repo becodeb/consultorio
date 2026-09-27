@@ -81,6 +81,19 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T11 Dockerfile + docker-compose.yml (files only — GitHub repo, Coolify app, domain
       and live checks are the coordinator's own follow-up).
 
+## Phase 3 scope (authorized by the user on 2026-09-27)
+
+- Voice conversation memory: the assistant keeps a short context of the recent exchange so
+  a follow-up like "Lucía Gómez, lunes a las cinco" completes a previous "creame un nuevo
+  paciente" that asked for the missing data. Stored client-side (localStorage), short-lived.
+- Biweekly patients: a schedule slot can repeat every week or every two weeks.
+
+### Phase 3 tasks
+
+- [ ] T12 Voice conversation memory (client history + server multi-turn prompt + UI).
+- [ ] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
+- [ ] T14 Redeploy to Coolify + live checks (coordinator).
+
 ## Acceptance criteria
 
 - Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
