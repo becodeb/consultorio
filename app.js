@@ -45,6 +45,48 @@ function slotOrder(a, b) {
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/* ---------- shared 24h time picker (two <select>s, never the locale's AM/PM input) --- */
+const TIME_PICKER_DEFAULT_HOURS = (() => {
+  const out = [];
+  for (let h = 7; h <= 22; h++) out.push(String(h).padStart(2, '0'));
+  return out;
+})();
+const TIME_PICKER_DEFAULT_MINUTES = ['00', '15', '30', '45'];
+
+/** Renders a compact "HH : MM" 24h picker (two native <select>s, so it stays keyboard
+ *  and screen-reader friendly) into `container`, replacing its content. Hour options
+ *  cover 07-22 by default, extended to include the initial value if it falls outside that
+ *  (e.g. an existing very early/late session); minutes are the usual quarter-hours plus
+ *  the initial value's minute if it's off-grid. Returns a live { value } accessor. */
+function mountTimePicker(container, initial) {
+  const [ih, im] = (initial && HHMM_RE.test(initial) ? initial : '16:00').split(':');
+  const hours = TIME_PICKER_DEFAULT_HOURS.includes(ih)
+    ? TIME_PICKER_DEFAULT_HOURS
+    : [...TIME_PICKER_DEFAULT_HOURS, ih].sort();
+  const minutes = TIME_PICKER_DEFAULT_MINUTES.includes(im)
+    ? TIME_PICKER_DEFAULT_MINUTES
+    : [...TIME_PICKER_DEFAULT_MINUTES, im].sort();
+
+  container.classList.add('time-picker');
+  container.innerHTML = `
+    <select class="time-picker-hour" aria-label="Hora">${hours.map(h => `<option value="${h}" ${h === ih ? 'selected' : ''}>${h}</option>`).join('')}</select>
+    <span class="time-picker-sep" aria-hidden="true">:</span>
+    <select class="time-picker-min" aria-label="Minutos">${minutes.map(m => `<option value="${m}" ${m === im ? 'selected' : ''}>${m}</option>`).join('')}</select>`;
+
+  const hourEl = container.querySelector('.time-picker-hour');
+  const minEl = container.querySelector('.time-picker-min');
+  return {
+    get value() { return `${hourEl.value}:${minEl.value}`; },
+    set value(v) {
+      if (!HHMM_RE.test(v)) return;
+      const [h, m] = v.split(':');
+      if (!hourEl.querySelector(`option[value="${h}"]`)) hourEl.add(new Option(h, h));
+      if (!minEl.querySelector(`option[value="${m}"]`)) minEl.add(new Option(m, m));
+      hourEl.value = h; minEl.value = m;
+    },
+  };
+}
+
 function emptyDb() {
   return { version: 2, patients: [], changes: [], attendance: [], payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
 }
@@ -1049,7 +1091,7 @@ function slotRow(slot = { day: 1, time: '16:00' }) {
     <div class="slot-row">
       <select class="slot-day" aria-label="Día">${[1, 2, 3, 4, 5, 6, 0].map(d =>
         `<option value="${d}" ${d === slot.day ? 'selected' : ''}>${DAYS[d]}</option>`).join('')}</select>
-      <input type="time" class="slot-time" value="${slot.time}" required aria-label="Hora">
+      <div class="slot-time"></div>
       <button type="button" class="x" aria-label="Quitar horario">×</button>
     </div>
     <div class="slot-freq">
@@ -1061,6 +1103,8 @@ function slotRow(slot = { day: 1, time: '16:00' }) {
         <select class="slot-anchor-select" aria-label="Próxima vez"></select>
       </label>
     </div>`;
+  const timeEl = div.querySelector('.slot-time');
+  timeEl._picker = mountTimePicker(timeEl, slot.time);
   div.querySelector('.x').onclick = () => div.remove();
   div.querySelectorAll('.seg-btn').forEach(btn =>
     btn.addEventListener('click', () => setSlotFrequency(div, Number(btn.dataset.every))));
@@ -1100,7 +1144,7 @@ form.addEventListener('submit', e => {
   const schedule = [...slotsEl.querySelectorAll('.slot')]
     .map(r => {
       const day = Number(r.querySelector('.slot-day').value);
-      const time = r.querySelector('.slot-time').value;
+      const time = r.querySelector('.slot-time')._picker.value;
       const every = Number(r.querySelector('.seg-btn.active')?.dataset.every) === 2 ? 2 : 1;
       const slot = { day, time };
       if (every === 2) { slot.every = 2; slot.anchor = r.querySelector('.slot-anchor-select').value; }
@@ -1214,6 +1258,7 @@ app.addEventListener('change', e => {
 /* ---------- reschedule sheet ---------- */
 const reschedule = document.getElementById('reschedule');
 const rescheduleForm = document.getElementById('reschedule-form');
+const rescheduleTimePicker = mountTimePicker(document.getElementById('reschedule-time-picker'), '16:00');
 let rescheduleCtx = null; // { patientId, date, time }
 
 function openReschedule(patientId, date, time) {
@@ -1224,7 +1269,7 @@ function openReschedule(patientId, date, time) {
   document.getElementById('reschedule-once-fields').hidden = true;
   document.getElementById('reschedule-confirm').hidden = true;
   rescheduleForm.elements.toDate.value = date;
-  rescheduleForm.elements.toTime.value = time || '';
+  rescheduleTimePicker.value = time || '16:00';
   reschedule.showModal();
 }
 
@@ -1249,7 +1294,7 @@ rescheduleForm.addEventListener('submit', e => {
   e.preventDefault();
   if (!rescheduleCtx) return;
   const toDate = rescheduleForm.elements.toDate.value;
-  const toTime = rescheduleForm.elements.toTime.value;
+  const toTime = rescheduleTimePicker.value;
   if (!ISO_DATE_RE.test(toDate) || !HHMM_RE.test(toTime)) { toast('Fecha u hora inválida'); return; }
   rescheduleOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date, toDate, toTime);
   save(); reschedule.close(); render(); toast('Sesión reprogramada');

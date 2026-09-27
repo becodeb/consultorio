@@ -422,6 +422,15 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
   display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 12px;
 }
 .slot-row { display: grid; grid-template-columns: 1fr 1fr 44px; gap: 8px; }
+
+/* Shared 24h time picker (two <select>s, never the platform's AM/PM time input) */
+.time-picker { display: flex; align-items: center; gap: 4px; }
+.time-picker select {
+  min-height: 46px; padding: 10px 4px; text-align: center; flex: 1; min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.time-picker-sep { font-weight: 700; color: var(--muted); }
+#reschedule-time-picker { margin-bottom: 14px; }
 .slot .x { border: 0; background: none; font-size: 22px; color: var(--muted); }
 .slot-freq { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .segmented {

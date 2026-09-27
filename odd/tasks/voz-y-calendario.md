@@ -93,7 +93,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 - [x] T12 Voice conversation memory (client history + server multi-turn prompt + UI).
 - [x] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
-- [ ] T14 24-hour time picker everywhere ("16:00", never "4 PM"): the native
+- [x] T14 24-hour time picker everywhere ("16:00", never "4 PM"): the native
       `<input type=time>` follows the phone's 12h locale.
 - [ ] T15 Redeploy to Coolify + live checks (coordinator).
 
@@ -637,6 +637,26 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   | 2 | "Tomás pasa a venir cada 15 días, la próxima es el jueves que viene" (existing Tue 15:00 patient) | correct `update_patient` on the right `patientId`, schedule `[{day:4,time:"15:00",every:2,anchor:"2026-10-01"}]` — kept his existing time, changed only the day/frequency/anchor | 782ms |
 
   2/2 correct.
+
+- T14 (commit pending): every `<input type="time">` replaced by a shared
+  `mountTimePicker(container, initial)` — two native `<select>`s ("HH" 07-22 by default,
+  extended to include the initial value if it's outside that; "MM" the usual quarter-hours
+  plus the initial minute if off-grid) rendered as "16 : 00", with `aria-label`s "Hora"/
+  "Minutos" and a live `{value}` accessor (get/set "HH:MM") stored on the container element
+  so callers can read/write it like a form field. One helper, two call sites: the slot
+  editor (`slotRow`, replacing the bare `<input>`) and the reschedule sheet's "Nueva hora".
+  `grep -c 'type="time"' index.html app.js` is `0` in both. `nowHM()` and the rest of the
+  app already formatted every displayed time manually (`pad2` + `:`), and there was no
+  `toLocaleTimeString`/`hour12` usage anywhere, so no other display-side fix was needed.
+  Server prompt: added an explicit rule that both actions *and* `reply` text are always
+  24h ("16:00"/"16 hs"), never "4 PM".
+
+  Checks: `node --check app.js server.mjs` pass; `grep` confirms zero native time inputs.
+  Playwright/Chromium: picked 09:30 in the editor → patient list shows "09:30" → reopening
+  the same patient shows the picker's hour/minute selects still at 09/30 (round-trip);
+  picked 11:15 in the reschedule sheet → the occurrence actually moved to 11:15 in Hoy
+  (not just a UI-only check). Screenshots of both pickers inspected by hand — clean
+  "HH : MM" layout, no leftover native clock-icon affordance, no truncation at 390px.
 
 ## Next step
 
