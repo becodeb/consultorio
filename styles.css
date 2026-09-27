@@ -421,7 +421,7 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 .slot {
   display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 12px;
 }
-.slot-row { display: grid; grid-template-columns: 1fr 1fr 44px; gap: 8px; }
+.slot-row { display: grid; grid-template-columns: max-content minmax(0, 1fr) 44px; gap: 8px; }
 
 /* Shared 24h time picker (two <select>s, never the platform's AM/PM time input) */
 .time-picker { display: flex; align-items: center; gap: 4px; }

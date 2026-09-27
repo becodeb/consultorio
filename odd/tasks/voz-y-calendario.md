@@ -658,6 +658,59 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   (not just a UI-only check). Screenshots of both pickers inspected by hand — clean
   "HH : MM" layout, no leftover native clock-icon affordance, no truncation at 390px.
 
+- Checks (commit pending): `tools/e2e.mjs` extended with 3 phase-3 scenarios and adapted
+  in place where phase-2 scenarios still referenced the pre-T12 `#voice-result` element
+  (removed when the chat UI landed) — `scenarioPayments` and `scenarioVoiceTextFallback`
+  were silently broken by that rename until this pass caught and fixed them by re-running
+  the full suite, not just by re-reading the diff.
+  - **Voice memory**: mocks `/api/voice`, asserts the 1st request's `history` is `[]`, the
+    2nd request's `history` has exactly the 1st exchange verbatim (`text/reply` fields
+    checked, not just length), 4 chat bubbles render, "Nueva conversación" empties the
+    visible log, and the next request's `history` is `[]` again.
+  - **Biweekly**: on the seed's new biweekly patient (Camila Torres, Wed 17:00, anchored
+    to this week), asserts Hoy shows her on the anchor Wednesday, not the next Wednesday,
+    and again the Wednesday after that (both sides of an off-week); Semana renders exactly
+    one block; Mes dots the anchor week; the editor round-trip (reopen → confirm "Cada 2
+    semanas" + the anchor picker are shown → save unchanged) still has `every:2` and a
+    valid `anchor` on the server afterward.
+  - **24h picker**: confirms zero `input[type="time"]` in both the editor and the
+    reschedule sheet, and that picking 16:00 in each actually persists as "16:00" on the
+    server (not just in the DOM).
+
+  **Real bugs found while running this** (all fixed, all confirmed via a passing rerun,
+  not just patched and assumed): (1) the two stale `#voice-result` scenarios above.
+  (2) The general per-IP rate limit (120 req/min) started rejecting the suite's own
+  `/api/data` calls partway through screenshots — 12 scenarios plus 2 screenshot signups,
+  each with several sync calls, legitimately exceeds that within the run's ~30-45s;
+  raised to 300/min (same reasoning as T10's auth-limit fix: still a real throttle, just
+  sized for realistic multi-device/test bursts instead of a single trickle). (3) **A
+  cosmetic layout bug caught only by reading the `pacientes-editor.png` screenshot**: the
+  weekday `<select>` in a slot row rendered as "Miércole" (visibly cut off) once the T14
+  time picker's two extra `<select>`s started competing for the same row width. First
+  attempt (a fixed `104px` column) made it worse ("Miércol"); `max-content` sizing fixed
+  the day select but then squeezed the time picker's "16"/"00" down to slivers — the row
+  genuinely doesn't have room for a full weekday name *and* two comfortable time selects
+  at 390px. Fixed properly by switching the slot-row day `<select>` to the same
+  `DAY_SHORT` abbreviations ("Mié") already used everywhere else in this app for compact
+  displays (`grid-template-columns: max-content minmax(0,1fr) 44px`) — confirmed with a
+  fresh screenshot showing "Mié" and "17 : 00" both fully legible with room to spare.
+
+  Ran the full suite three times across this pass (twice before the rate-limit/width
+  fixes surfaced the above, once clean after) — final run: `node --check app.js
+  server.mjs tools/e2e.mjs` pass, **12/12 scenarios green** (all phase-1/2/3 scenarios
+  together), screenshots written to `shots/`: `login.png`, `hoy.png`, `semana.png`
+  (includes the biweekly block), `mes.png`, `cuentas.png`, `cuentas-paciente.png`,
+  `pacientes-editor.png` (biweekly + 24h picker), `voz.png` (2-turn conversation),
+  `hoy-dark.png` — every one inspected by hand.
+
+  Housekeeping: found and killed (by exact PID, confirmed by port first) two of my own
+  leftover Chromium instances from an earlier crashed ad hoc script before starting the
+  final suite runs, per "one Chromium at a time"; left other sessions' unrelated Chromium/
+  server processes on this shared Pi untouched (confirmed unrelated by port/profile-dir
+  before deciding not to touch them, not assumed). No local server started or left running
+  per the coordinator's instruction — production is the live deploy.
+
 ## Next step
 
-T13.
+None — T12, T13, T14 and the Checks pass are all done. T15 (redeploy to Coolify + live
+checks) is explicitly the coordinator's own follow-up.

@@ -28,6 +28,7 @@ const CHROMIUM_PATH = '/usr/bin/chromium';
 /* ---------- date helpers (standalone copies; this script has no DOM/app.js access) --- */
 function iso(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function addDays(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Monday, so the weekly schedule + the "esta semana" reschedule scenario are unambiguous.
 // 14:10 falls inside Martina's 14:00-14:45 session window, so the Ahora card is exercised.
@@ -48,6 +49,9 @@ function buildSeed() {
     { id: 'p5', name: 'Lucía Gómez', price: 19000, schedule: [{ day: 1, time: '09:00' }, { day: 3, time: '09:30' }], active: true, color: '#9B6BDF', since },
     { id: 'p6', name: 'Valentina Ruiz', price: 22000, schedule: [{ day: 5, time: '18:00' }], active: true, color: '#E5534B', since },
     { id: 'p7', name: 'Bautista Ríos', price: 16000, schedule: [{ day: 4, time: '19:00' }], active: true, color: '#2FA7C9', since },
+    // Biweekly: Wednesday 17:00 every other week, anchored to this week's Wednesday (an
+    // "on" week) — shows up in this week's Hoy/Semana/Mes, absent the week after.
+    { id: 'p8', name: 'Camila Torres', price: 18000, schedule: [{ day: 3, time: '17:00', every: 2, anchor: iso(addDays(ANCHOR, 2)) }], active: true, color: '#8FB33A', since },
   ];
 
   // Joaquín's usual Tuesday 17:00 is moved to today (Monday) 11:00 — shows the "moved" badge.
@@ -358,9 +362,9 @@ async function scenarioPayments(browser, origin) {
     await page.waitForSelector('#voice-sheet[open]');
     await page.fill('#voice-text-input', 'pagó todo');
     await page.click('#voice-text-form button[type="submit"]');
-    await page.waitForFunction(() => (document.querySelector('#voice-result')?.innerHTML || '').includes('voice-done'));
-    const resultHtml = await page.locator('#voice-result').innerHTML();
-    assertTrue(resultHtml.includes('pagó'), 'the record_payment result should be described in the done list');
+    await page.waitForFunction(() => (document.querySelector('#voice-chat')?.innerHTML || '').includes('chat-done'));
+    const chatHtml = await page.locator('#voice-chat').innerHTML();
+    assertTrue(chatHtml.includes('pagó'), 'the record_payment result should be described in the done list');
   } finally {
     await context.close();
   }
@@ -417,7 +421,8 @@ async function scenarioReschedule(browser, origin) {
     await page.waitForSelector('#reschedule[open]');
     await page.click('[data-choice="once"]');
     await page.fill('#reschedule-form [name="toDate"]', iso(thursday));
-    await page.fill('#reschedule-form [name="toTime"]', '18:30');
+    await page.selectOption('#reschedule-time-picker .time-picker-hour', '18');
+    await page.selectOption('#reschedule-time-picker .time-picker-min', '30');
     await page.click('#reschedule-confirm');
     await page.waitForTimeout(220);
 
@@ -501,10 +506,10 @@ async function scenarioVoiceTextFallback(browser, origin) {
     await page.waitForSelector('#voice-sheet[open]');
     await page.fill('#voice-text-input', 'hoy vino Sofía');
     await page.click('#voice-text-form button[type="submit"]');
-    await page.waitForFunction(() => (document.querySelector('#voice-result')?.innerHTML || '').includes('voice-done'));
+    await page.waitForFunction(() => (document.querySelector('#voice-chat')?.innerHTML || '').includes('chat-done'));
 
-    const resultHtml = await page.locator('#voice-result').innerHTML();
-    assertTrue(resultHtml.includes('voice-done'), 'a valid action should be listed as done');
+    const chatHtml = await page.locator('#voice-chat').innerHTML();
+    assertTrue(chatHtml.includes('chat-done'), 'a valid action should be listed as done');
     assertTrue(await page.locator('#voice-undo').count() === 1, 'Deshacer must be offered after applying a voice action');
 
     await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
@@ -514,12 +519,168 @@ async function scenarioVoiceTextFallback(browser, origin) {
       'the voice action must actually be applied and synced to the server');
 
     await page.click('#voice-undo');
-    await page.waitForFunction(() => (document.querySelector('#voice-result')?.textContent || '').includes('Deshecho'));
+    await page.waitForFunction(() => (document.getElementById('toast')?.textContent || '').includes('Deshecho'));
     await page.waitForTimeout(700); // undo's own save() debounce, so the server reflects it too
     const afterUndo = await readServerData(page);
     const stillPresentToday = afterUndo.data.attendance.some(a => a.date === ANCHOR_ISO && a.status === 'present' &&
       afterUndo.data.patients.find(p => p.id === a.patientId)?.name === 'Sofía Díaz');
     assertTrue(!stillPresentToday, 'Deshacer must restore the pre-batch snapshot, synced back to the server too');
+  } finally {
+    await context.close();
+  }
+}
+
+/* ---------- scenarios: phase 3 (voice memory, biweekly slots, 24h picker) ---------- */
+
+async function scenarioVoiceMemory(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('memory');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    const capturedHistories = [];
+    let call = 0;
+    await page.route('**/api/voice', async route => {
+      call++;
+      capturedHistories.push(route.request().postDataJSON().history);
+      if (call === 1) {
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({ actions: [], reply: '¿Cómo se llama y qué horario tiene?' }),
+        });
+      } else {
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({
+            actions: [{ type: 'add_patient', name: 'Nueva Paciente', price: 15000, schedule: [{ day: 1, time: '17:00' }] }],
+            reply: 'Listo, la agregué.',
+          }),
+        });
+      }
+    });
+
+    await page.click('#mic-fab');
+    await page.waitForSelector('#voice-sheet[open]');
+    await page.fill('#voice-text-input', 'creame un nuevo paciente');
+    await page.click('#voice-text-form button[type="submit"]');
+    await page.waitForFunction(() => document.querySelectorAll('.chat-bubble').length >= 2);
+    assertEqual(capturedHistories[0].length, 0, 'the first request must carry no history');
+
+    await page.fill('#voice-text-input', 'Nueva Paciente, quince mil, lunes a las cinco');
+    await page.click('#voice-text-form button[type="submit"]');
+    await page.waitForFunction(() => document.querySelectorAll('.chat-bubble').length >= 4);
+    assertEqual(capturedHistories[1].length, 2, 'the second request must carry the first exchange as history');
+    assertEqual(capturedHistories[1][0].text, 'creame un nuevo paciente', 'history[0] must be the first user turn verbatim');
+    assertEqual(capturedHistories[1][1].reply, '¿Cómo se llama y qué horario tiene?', 'history[1] must be the assistant reply verbatim');
+    assertEqual(await page.locator('.chat-bubble').count(), 4, '4 chat bubbles should render after 2 exchanges');
+
+    await page.click('#voice-new-chat');
+    assertEqual(await page.locator('.chat-bubble').count(), 0, 'Nueva conversación must clear the visible chat log');
+    await page.fill('#voice-text-input', 'otra cosa');
+    await page.click('#voice-text-form button[type="submit"]');
+    await page.waitForFunction(() => document.querySelectorAll('.chat-bubble').length >= 2);
+    assertEqual(capturedHistories[2].length, 0, 'history must be empty again after Nueva conversación');
+  } finally {
+    await context.close();
+  }
+}
+
+async function scenarioBiweekly(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('biweekly');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    // Camila (Wed 17:00, every 2, anchored to this week's Wednesday) is on an "on" week now.
+    await page.click('[data-act="day"][data-step="1"]'); // Mon -> Tue
+    await page.click('[data-act="day"][data-step="1"]'); // Tue -> Wed (on)
+    await page.waitForTimeout(180);
+    assertEqual(await page.locator('li.row.appt', { hasText: 'Camila Torres' }).count(), 1,
+      'biweekly patient must appear on her anchor Wednesday');
+
+    for (let i = 0; i < 7; i++) await page.click('[data-act="day"][data-step="1"]'); // next Wed (off)
+    await page.waitForTimeout(180);
+    assertEqual(await page.locator('li.row.appt', { hasText: 'Camila Torres' }).count(), 0,
+      'biweekly patient must NOT appear on the off week');
+
+    for (let i = 0; i < 7; i++) await page.click('[data-act="day"][data-step="1"]'); // Wed after that (on again)
+    await page.waitForTimeout(180);
+    assertEqual(await page.locator('li.row.appt', { hasText: 'Camila Torres' }).count(), 1,
+      'biweekly patient must appear again 2 weeks after the off week (both sides of the anchor honored)');
+
+    await goToView(page, 'semana');
+    assertEqual(await page.locator('.week-block', { hasText: 'Camila' }).count(), 1,
+      'Semana should render exactly one block for the biweekly patient on her on-week');
+
+    await goToView(page, 'mes');
+    const onIso = iso(addDays(ANCHOR, 2));
+    assertTrue(await page.locator(`.month-cell[data-date="${onIso}"] .dot`).count() >= 1,
+      'Mes should show a dot on the anchor Wednesday');
+
+    // Editor round-trip: reopen, confirm the frequency/anchor UI reflects the stored slot,
+    // save unchanged, and confirm every/anchor survive on the server.
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Camila Torres' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.waitForTimeout(100);
+    assertTrue(await page.locator('.seg-btn[data-every="2"]').evaluate(el => el.classList.contains('active')),
+      'reopened biweekly slot should show "Cada 2 semanas" as the active frequency');
+    assertTrue(!(await page.locator('.slot-anchor').first().isHidden()),
+      'reopened biweekly slot should show the "Próxima vez" anchor picker');
+    await page.click('#editor-form button[type="submit"]');
+    await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
+
+    const server = await readServerData(page);
+    const camila = server.data.patients.find(p => p.name === 'Camila Torres');
+    assertEqual(camila.schedule[0].every, 2, 'every must survive an untouched editor round-trip');
+    assertTrue(ISO_DATE_RE.test(camila.schedule[0].anchor || ''), 'anchor must still be a valid date after round-trip');
+  } finally {
+    await context.close();
+  }
+}
+
+async function scenarioTimePicker(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('timepicker');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    await goToView(page, 'pacientes');
+    await page.click('[data-act="new"]');
+    await page.waitForSelector('dialog#editor[open]');
+    assertEqual(await page.locator('dialog#editor input[type="time"]').count(), 0,
+      'the patient editor must not contain a native (locale-dependent) time input');
+    await page.fill('#editor-form [name="patientName"]', 'Horario Test');
+    await page.fill('#editor-form [name="price"]', '15000');
+    await page.selectOption('.slot-time .time-picker-hour', '16');
+    await page.selectOption('.slot-time .time-picker-min', '00');
+    await page.click('#editor-form button[type="submit"]');
+    await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
+    let server = await readServerData(page);
+    let p = server.data.patients.find(x => x.name === 'Horario Test');
+    assertTrue(!!p, 'the new patient must have been saved');
+    assertEqual(p.schedule[0].time, '16:00', 'the editor picker must save exactly "16:00"');
+
+    await goToView(page, 'hoy');
+    const martinaRow = page.locator('li.row.appt', { hasText: 'Martina López' }).first();
+    await martinaRow.locator('[data-act="reprogramar"]').click();
+    await page.waitForSelector('#reschedule[open]');
+    await page.click('[data-choice="once"]');
+    await page.waitForTimeout(100);
+    assertEqual(await page.locator('dialog#reschedule input[type="time"]').count(), 0,
+      'the reschedule sheet must not contain a native time input');
+    await page.selectOption('#reschedule-time-picker .time-picker-hour', '16');
+    await page.selectOption('#reschedule-time-picker .time-picker-min', '00');
+    await page.click('#reschedule-confirm');
+    await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
+
+    server = await readServerData(page);
+    const move = server.data.changes.find(c => c.kind === 'move' && c.patientId === 'p1');
+    assertTrue(!!move, 'a move change must have been recorded');
+    assertEqual(move.toTime, '16:00', 'the reschedule picker must save exactly "16:00"');
   } finally {
     await context.close();
   }
@@ -564,23 +725,44 @@ async function takeScreenshots(browser, origin) {
       await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas-paciente.png') });
       await page.click('#accounts-close');
 
+      // voz.png: a real 2-turn conversation (pending question, then its answer) rendered
+      // as the compact chat, so the memory feature is visible in the screenshot itself.
+      let voiceCall = 0;
       await page.route('**/api/voice', async route => {
-        const body = route.request().postDataJSON();
-        const target = body.context.patients[1];
-        await route.fulfill({
-          status: 200, contentType: 'application/json',
-          body: JSON.stringify({
-            actions: [{ type: 'mark_attendance', patientId: target.id, date: body.context.today, status: 'present' }],
-            reply: `Listo, marqué a ${target.name.split(' ')[0]} como presente hoy.`,
-          }),
-        });
+        voiceCall++;
+        if (voiceCall === 1) {
+          await route.fulfill({
+            status: 200, contentType: 'application/json',
+            body: JSON.stringify({ actions: [], reply: '¿Cómo se llama la paciente y qué horario tiene?' }),
+          });
+        } else {
+          await route.fulfill({
+            status: 200, contentType: 'application/json',
+            body: JSON.stringify({
+              actions: [{ type: 'add_patient', name: 'Lucía Torres', price: 15000, schedule: [{ day: 1, time: '17:00' }] }],
+              reply: 'Listo, agregué a Lucía Torres.',
+            }),
+          });
+        }
       });
       await page.click('#mic-fab');
       await page.waitForSelector('#voice-sheet[open]');
-      await page.fill('#voice-text-input', 'hoy vino Sofía');
+      await page.fill('#voice-text-input', 'creame un nuevo paciente');
       await page.click('#voice-text-form button[type="submit"]');
-      await page.waitForFunction(() => (document.querySelector('#voice-result')?.innerHTML || '').includes('voice-done'));
+      await page.waitForFunction(() => document.querySelectorAll('.chat-bubble').length >= 2);
+      await page.fill('#voice-text-input', 'Lucía Torres, quince mil, lunes a las cinco');
+      await page.click('#voice-text-form button[type="submit"]');
+      await page.waitForFunction(() => document.querySelectorAll('.chat-bubble').length >= 4);
+      await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(SHOTS_DIR, 'voz.png') });
+      await page.click('#voice-close');
+
+      // pacientes-editor.png: a biweekly slot with the 24h picker, mid-edit.
+      await goToView(page, 'pacientes');
+      await page.locator('button.row', { hasText: 'Camila Torres' }).click();
+      await page.waitForSelector('dialog#editor[open]');
+      await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'pacientes-editor.png') });
     } finally {
       await context.close();
     }
@@ -639,6 +821,11 @@ async function main() {
     await check('reschedule_once via sheet moves the occurrence, schedule unchanged', () => scenarioReschedule(browser, origin));
     await check('Cuentas sums only present sessions at frozen price', () => scenarioCuentasFrozenPrice(browser, origin));
     await check('voice sheet text fallback applies actions + Deshacer restores (synced)', () => scenarioVoiceTextFallback(browser, origin));
+
+    // Phase 3: voice memory, biweekly slots, 24h time picker
+    await check('voice history: 2nd request carries the 1st turn, chat renders both, Nueva conversación clears it', () => scenarioVoiceMemory(browser, origin));
+    await check('biweekly slot: on/off weeks in Hoy/Semana/Mes, editor round-trip keeps every/anchor', () => scenarioBiweekly(browser, origin));
+    await check('24h time picker: no native input[type=time], selecting 16:00 saves "16:00"', () => scenarioTimePicker(browser, origin));
 
     console.log('\nTaking screenshots...');
     await takeScreenshots(browser, origin);

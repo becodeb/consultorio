@@ -1090,7 +1090,7 @@ function slotRow(slot = { day: 1, time: '16:00' }) {
   div.innerHTML = `
     <div class="slot-row">
       <select class="slot-day" aria-label="Día">${[1, 2, 3, 4, 5, 6, 0].map(d =>
-        `<option value="${d}" ${d === slot.day ? 'selected' : ''}>${DAYS[d]}</option>`).join('')}</select>
+        `<option value="${d}" ${d === slot.day ? 'selected' : ''}>${DAY_SHORT[d]}</option>`).join('')}</select>
       <div class="slot-time"></div>
       <button type="button" class="x" aria-label="Quitar horario">×</button>
     </div>
