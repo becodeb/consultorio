@@ -87,12 +87,15 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   a follow-up like "Lucía Gómez, lunes a las cinco" completes a previous "creame un nuevo
   paciente" that asked for the missing data. Stored client-side (localStorage), short-lived.
 - Biweekly patients: a schedule slot can repeat every week or every two weeks.
+- Times must be entered as 24h ("16hs"), not AM/PM.
 
 ### Phase 3 tasks
 
 - [ ] T12 Voice conversation memory (client history + server multi-turn prompt + UI).
 - [ ] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
-- [ ] T14 Redeploy to Coolify + live checks (coordinator).
+- [ ] T14 24-hour time picker everywhere ("16:00", never "4 PM"): the native
+      `<input type=time>` follows the phone's 12h locale.
+- [ ] T15 Redeploy to Coolify + live checks (coordinator).
 
 ## Acceptance criteria
 
