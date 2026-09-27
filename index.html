@@ -117,8 +117,13 @@
 </dialog>
 
 <dialog id="voice-sheet">
-  <div class="sheet-inner">
-    <h2>Asistente por voz</h2>
+  <div class="voice-sheet-inner">
+    <div class="voice-sheet-head">
+      <h2>Asistente por voz</h2>
+      <button type="button" id="voice-new-chat" class="voice-new-chat">Nueva conversación</button>
+    </div>
+    <div id="voice-chat" class="voice-chat" aria-live="polite"></div>
+    <div id="voice-undo-slot"></div>
     <button type="button" id="voice-mic-btn" class="voice-mic" aria-label="Escuchar / detener"></button>
     <div id="voice-status" class="voice-status"></div>
     <div id="voice-transcript" class="voice-transcript" aria-live="polite"></div>
@@ -131,7 +136,6 @@
         <button type="submit" class="btn primary">Enviar</button>
       </div>
     </form>
-    <div id="voice-result" aria-live="polite"></div>
   </div>
 </dialog>
 

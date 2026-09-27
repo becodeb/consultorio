@@ -91,7 +91,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ### Phase 3 tasks
 
-- [ ] T12 Voice conversation memory (client history + server multi-turn prompt + UI).
+- [x] T12 Voice conversation memory (client history + server multi-turn prompt + UI).
 - [ ] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
 - [ ] T14 24-hour time picker everywhere ("16:00", never "4 PM"): the native
       `<input type=time>` follows the phone's 12h locale.
@@ -526,7 +526,65 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   test data in prod; the free ai-router cascade was verified from the Pi with 10 calls).
 - Local server on 8811 stopped (its `data/` DB is separate from production).
 
+- T12 (commit pending): client keeps `voiceHistory` (last 8 turns,
+  `{role:'user',text}` / `{role:'assistant',reply,done}`), persisted per user under
+  `consultorio.voice.<userId>` with an `updatedAt` timestamp; `loadVoiceHistory()` discards
+  it once idle past 20 minutes. Sent as `history` on every `POST /api/voice`.
+  `server.mjs`'s `sanitizeHistory()` caps it independently of the client (≤8 turns, ≤4000
+  combined chars, per-field length caps, shape-validated) before `callLlm` turns it into
+  real prior `user`/`assistant` messages (an assistant turn's content is
+  `JSON.stringify({reply,done})`, so the model can see exactly what it already applied).
+  Added prompt rules: never repeat an action already in a prior turn's `done`; if the last
+  assistant reply asked for missing data for a pending intent (add_patient, reschedule,
+  record_payment, …) and the new utterance reads as the answer, complete that same intent
+  instead of asking again; an unrelated new request is still handled fresh.
+
+  UI: the voice sheet now shows the exchange as a compact chat (`#voice-chat`, right-
+  aligned dark user bubbles, left-aligned outlined assistant bubbles with their `done`
+  list underneath, auto-scrolled to the newest turn), with "Nueva conversación" clearing
+  the history. "Deshacer" moved to a dedicated slot below the chat (still tied to the most
+  recent applied batch only, same `undoSnapshot` semantics as before).
+
+  **Two real layout bugs found and fixed while screenshotting** (not caught by code
+  review): (1) `.voice-new-chat` was absolutely positioned over a centered `<h2>`, so on a
+  long title ("Asistente por voz") the button visually overlapped the text — fixed with an
+  ordinary `justify-content: space-between` header row and a smaller, `white-space: nowrap`
+  title instead of absolute positioning. (2) forcing `dialog#voice-sheet` to a fixed
+  `height: 88dvh` (added so the chat area could flex-scroll) left a large dead gap below a
+  short 2-turn conversation, because the flex chat area had no reason to grow yet the
+  dialog was still forced to nearly full height; fixed by using `max-height` (not `height`)
+  on both the dialog and its inner flex column — a flex child only consumes leftover space
+  when the container is actually height-constrained by real content, so a short
+  conversation now hugs its content and a long one caps at 88dvh with the chat area (not
+  the whole sheet) scrolling internally. Verified pixel-by-pixel via
+  `getBoundingClientRect()` (not just eyeballing a screenshot) that every gap between the
+  chat log, the undo slot, the mic circle, and the text-fallback form is exactly the
+  intended 8px, with no unaccounted space. Also discovered mid-fix that `.sheet-inner` was
+  a class shared with the T8 accounts (payments) sheet, so the new flex-column rules had
+  silently leaked into it too; re-scoped the voice sheet to its own `.voice-sheet-inner`
+  class and confirmed the accounts sheet's layout is unchanged (screenshot comparison
+  against the T10 version).
+
+  Checks: `node --check app.js server.mjs` pass. Playwright/Chromium (mocked
+  `POST /api/voice` via `page.route`): first request's `history` is `[]`; after one
+  exchange, the second request's `history` contains the first user+assistant turn
+  verbatim; 4 chat bubbles render after 2 exchanges; closing and reopening the sheet keeps
+  the history (localStorage); "Nueva conversación" empties it and the next request's
+  `history` is `[]` again; no console errors.
+
+  **Real ai-router test**, 4 calls (free cascade), covering exactly the user's reported
+  scenario plus a discipline check:
+
+  | # | Turn | Result | Latency |
+  |---|---|---|---|
+  | 1 | "creame un nuevo paciente" (no history) | correct: no action, asks for name/price/schedule | 798ms |
+  | 2 | "Lucía Gómez, quince mil, lunes a las cinco" (history = turn 1) | correct: completes the *same* pending `add_patient` from just the answer — the exact behavior she asked for — `{name:"Lucía Gómez", price:15000, schedule:[{day:1,time:"17:00"}]}` | 673ms |
+  | 3 | "Martina me pagó" (fresh conversation) | correct: `record_payment` `amount:null` resolved directly from the explicit prompt rule ("everything owed" is the default), no clarifying question needed — so the "¿cuánto?" follow-up path was never exercised because the model correctly didn't need it | 605ms |
+  | 4 | "Sofía no vino hoy" with a *fabricated* pending "nombre y horario" question in history, and no Sofía in context | correct: recognized this as an unrelated new request, not an answer to the stale question, and correctly refused (no matching active patient) rather than misapplying it as add_patient data | 2.79s |
+
+  4/4 correct; stopped early (budget was ~6) since the core memory behavior and the
+  discard-when-unrelated guard were both cleanly demonstrated.
+
 ## Next step
 
-User's first real use on the phone: create the account, load patients, try the mic.
-Engram mirror still pending (engram does not resolve project `consultorio`).
+T13.

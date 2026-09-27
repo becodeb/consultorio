@@ -431,7 +431,40 @@ Reply with ONLY one JSON object, no prose, no markdown fences: {"actions": [...]
 - {"type":"update_patient","patientId":"...","name"?:"...","price"?:0,"schedule"?:[...]}
 - {"type":"deactivate_patient","patientId":"..."}
 - {"type":"record_payment","patientId":"...","amount":number|null,"date":"YYYY-MM-DD"}  (amount null means "everything owed"; use null when she does not name a number and does not clearly mean a single session's price, e.g. "Martina me pagó" or "Sofía me pagó el mes" both mean null — the client resolves it to the current balance. "Joaquín pagó lo de hoy" means the price of today's session, a specific number, not null. Only propose record_payment when the balance context or her words make it unambiguous that a payment happened; a question like "¿cuánto me debe X?" is answered in "reply", never as a record_payment action.)
-Use exact "id" values from context.patients for patientId; never invent one. add_patient is the only action type without a patientId. If she names several patients at once ("vinieron Joaquín y Tomás"), return one mark_attendance action per patient.`;
+Use exact "id" values from context.patients for patientId; never invent one. add_patient is the only action type without a patientId. If she names several patients at once ("vinieron Joaquín y Tomás"), return one mark_attendance action per patient.
+
+You may also receive prior turns of this same conversation as extra messages before the current one: a real "user" message for what she said, and an "assistant" message whose content is JSON {"reply":"...","done":[...]} — "done" is a plain-language list of what was already applied (or "No hecho: <reason>" for something that was not). Never propose an action that duplicates one already listed in a prior "done". If the most recent assistant turn's "reply" asked her for missing information to complete an action (e.g. add_patient needs a name/price/schedule, reschedule_once needs a day/time, record_payment needs an amount), and her current message reads like an answer to exactly that question (e.g. just a name, price and schedule; just a day and time; just a number), complete that same pending action now using the new information — do not ask again or start over. If her current message clearly starts something unrelated instead, treat it as a fresh request and ignore the pending question.`;
+}
+
+/**
+ * Validates and caps client-sent conversation history before it reaches the model: at
+ * most 8 turns, each field length-capped, and a combined character budget so one request
+ * can't smuggle an oversized prompt through many small fields.
+ */
+function sanitizeHistory(history) {
+  if (!Array.isArray(history)) return [];
+  const CHAR_BUDGET = 4000;
+  const out = [];
+  let total = 0;
+  for (const turn of history.slice(-8)) {
+    if (!turn || typeof turn !== 'object') continue;
+    if (turn.role === 'user' && typeof turn.text === 'string') {
+      const text = turn.text.slice(0, 1000);
+      if (total + text.length > CHAR_BUDGET) break;
+      total += text.length;
+      out.push({ role: 'user', text });
+    } else if (turn.role === 'assistant' && typeof turn.reply === 'string') {
+      const reply = turn.reply.slice(0, 1000);
+      const done = Array.isArray(turn.done)
+        ? turn.done.filter(d => typeof d === 'string').slice(0, 10).map(d => d.slice(0, 200))
+        : [];
+      const size = reply.length + done.reduce((n, d) => n + d.length, 0);
+      if (total + size > CHAR_BUDGET) break;
+      total += size;
+      out.push({ role: 'assistant', reply, done });
+    }
+  }
+  return out;
 }
 
 /**
@@ -486,13 +519,15 @@ async function fetchAiRouterOnce(messages) {
   }
 }
 
-async function callLlm(text, context) {
+async function callLlm(text, context, history = []) {
   if (!AI_ROUTER_URL) throw Object.assign(new Error('ai-router not configured'), { code: 'NOT_CONFIGURED' });
 
-  const messages = [
-    { role: 'system', content: systemPrompt() },
-    { role: 'user', content: JSON.stringify({ text, context }) },
-  ];
+  const messages = [{ role: 'system', content: systemPrompt() }];
+  for (const turn of history) {
+    if (turn.role === 'user') messages.push({ role: 'user', content: turn.text });
+    else messages.push({ role: 'assistant', content: JSON.stringify({ reply: turn.reply, done: turn.done }) });
+  }
+  messages.push({ role: 'user', content: JSON.stringify({ text, context }) });
 
   // max_tokens / response_format are ignored by the router, so neither is sent. The model
   // sometimes wraps its JSON in prose or ```json fences; extractJsonObject is tolerant of
@@ -530,7 +565,9 @@ async function handleVoice(req, res) {
   if (!text.trim()) return sendJson(res, 400, { error: 'Falta el texto.' });
 
   try {
-    const result = await callLlm(text, payload.context && typeof payload.context === 'object' ? payload.context : {});
+    const context = payload.context && typeof payload.context === 'object' ? payload.context : {};
+    const history = sanitizeHistory(payload.history);
+    const result = await callLlm(text, context, history);
     sendJson(res, 200, result);
   } catch (e) {
     if (e.code === 'NOT_CONFIGURED') {

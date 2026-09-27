@@ -1272,11 +1272,67 @@ const voiceStatusEl = document.getElementById('voice-status');
 const voiceTranscriptEl = document.getElementById('voice-transcript');
 const voiceTextForm = document.getElementById('voice-text-form');
 const voiceTextInput = document.getElementById('voice-text-input');
-const voiceResultEl = document.getElementById('voice-result');
+const voiceChatEl = document.getElementById('voice-chat');
+const voiceUndoSlot = document.getElementById('voice-undo-slot');
 
 let recognition = null;
 let recognizing = false;
 let undoSnapshot = null;
+let voiceHistory = []; // {role:'user',text} | {role:'assistant',reply,done}[], newest last
+
+const VOICE_HISTORY_MAX_TURNS = 8;
+const VOICE_HISTORY_IDLE_MS = 20 * 60 * 1000;
+
+function voiceHistoryKey() { return `consultorio.voice.${userId}`; }
+
+function loadVoiceHistory() {
+  if (!userId) return [];
+  try {
+    const raw = localStorage.getItem(voiceHistoryKey());
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.turns) || typeof parsed.updatedAt !== 'string') return [];
+    const age = Date.now() - new Date(parsed.updatedAt).getTime();
+    if (!(age >= 0) || age > VOICE_HISTORY_IDLE_MS) return [];
+    return parsed.turns;
+  } catch { return []; }
+}
+function saveVoiceHistory() {
+  if (!userId) return;
+  try {
+    localStorage.setItem(voiceHistoryKey(), JSON.stringify({
+      turns: voiceHistory.slice(-VOICE_HISTORY_MAX_TURNS),
+      updatedAt: new Date().toISOString(),
+    }));
+  } catch {}
+}
+function clearVoiceHistory() {
+  voiceHistory = [];
+  undoSnapshot = null;
+  if (userId) { try { localStorage.removeItem(voiceHistoryKey()); } catch {} }
+}
+
+/** Renders the full turn history as compact chat bubbles, newest at the bottom, and keeps
+ *  the log scrolled there. `pending`, when given, is an optimistic user bubble + a
+ *  "Pensando…" placeholder for the request currently in flight — never persisted. */
+function renderVoiceChat(pending) {
+  const turns = pending ? voiceHistory.concat([{ role: 'user', text: pending }]) : voiceHistory;
+  if (!turns.length) {
+    voiceChatEl.innerHTML = '<p class="voice-chat-empty muted">Decime qué querés hacer.</p>';
+  } else {
+    voiceChatEl.innerHTML = turns.map(turn => {
+      if (turn.role === 'user') return `<div class="chat-bubble user"><p>${esc(turn.text)}</p></div>`;
+      const doneHtml = turn.done && turn.done.length
+        ? '<ul class="chat-done">' + turn.done.map(d => `<li>${esc(d)}</li>`).join('') + '</ul>' : '';
+      return `<div class="chat-bubble assistant">${turn.reply ? `<p>${esc(turn.reply)}</p>` : ''}${doneHtml}</div>`;
+    }).join('') + (pending ? '<div class="chat-bubble assistant thinking">Pensando…</div>' : '');
+  }
+  voiceChatEl.scrollTop = voiceChatEl.scrollHeight;
+}
+
+function renderVoiceUndoSlot(show) {
+  voiceUndoSlot.innerHTML = show ? '<button type="button" class="btn wide" id="voice-undo">Deshacer</button>' : '';
+}
 
 function speechSupported() {
   return !!(window.isSecureContext && (window.SpeechRecognition || window.webkitSpeechRecognition));
@@ -1315,7 +1371,9 @@ function startListening() {
 }
 
 function openVoiceSheet() {
-  voiceResultEl.innerHTML = '';
+  voiceHistory = loadVoiceHistory();
+  renderVoiceChat();
+  renderVoiceUndoSlot(false);
   voiceTranscriptEl.textContent = '';
   voiceTextInput.value = '';
   voiceStatusEl.textContent = '';
@@ -1326,25 +1384,34 @@ function openVoiceSheet() {
 
 async function submitVoiceText(text) {
   stopListening();
-  voiceResultEl.innerHTML = '<p class="muted">Pensando…</p>';
+  voiceTranscriptEl.textContent = '';
+  renderVoiceChat(text);
   const context = buildVoiceContext(db);
+  const history = voiceHistory.slice(-VOICE_HISTORY_MAX_TURNS);
   let data;
   try {
     const res = await fetch('/api/voice', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text, context }),
+      body: JSON.stringify({ text, context, history }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
-      voiceResultEl.innerHTML = `<p class="voice-error">${esc(body.error || 'No se pudo conectar con el asistente.')}</p>`;
+      voiceHistory.push({ role: 'user', text });
+      voiceHistory.push({ role: 'assistant', reply: body.error || 'No se pudo conectar con el asistente.', done: [] });
+      saveVoiceHistory();
+      renderVoiceChat();
       return;
     }
     data = body;
   } catch {
-    voiceResultEl.innerHTML = '<p class="voice-error">No se pudo conectar con el asistente.</p>';
+    voiceHistory.push({ role: 'user', text });
+    voiceHistory.push({ role: 'assistant', reply: 'No se pudo conectar con el asistente.', done: [] });
+    saveVoiceHistory();
+    renderVoiceChat();
     return;
   }
+  voiceHistory.push({ role: 'user', text });
   applyVoiceResult(data);
 }
 
@@ -1360,28 +1427,31 @@ function applyVoiceResult(data) {
     done.push(describeVoiceAction(db, a));
     applyVoiceAction(db, a);
   }
-  if (done.length) { undoSnapshot = snapshot; save(); render(); }
+  const appliedAny = done.length > 0;
+  if (appliedAny) { undoSnapshot = snapshot; save(); render(); }
+  else { undoSnapshot = null; }
 
-  let html = '';
-  if (reply) html += `<p class="voice-reply">${esc(reply)}</p>`;
-  if (done.length) {
-    html += '<ul class="voice-done">' + done.map(d => `<li>${esc(d)}</li>`).join('') + '</ul>';
-    html += '<button type="button" class="btn" id="voice-undo">Deshacer</button>';
-  }
-  if (failed.length) {
-    html += '<ul class="voice-invalid">' + failed.map(e => `<li>No hecho: ${esc(e)}</li>`).join('') + '</ul>';
-  }
-  if (!done.length && !failed.length && !reply) html = '<p class="muted">No entendí ninguna acción.</p>';
-  voiceResultEl.innerHTML = html;
-  const undoBtn = document.getElementById('voice-undo');
-  if (undoBtn) undoBtn.onclick = () => {
-    db = undoSnapshot; undoSnapshot = null; save(); render();
-    voiceResultEl.innerHTML = '<p class="muted">Deshecho.</p>';
-  };
+  const outcomes = done.concat(failed.map(e => `No hecho: ${e}`));
+  voiceHistory.push({ role: 'assistant', reply, done: outcomes });
+  voiceHistory = voiceHistory.slice(-VOICE_HISTORY_MAX_TURNS);
+  saveVoiceHistory();
+  renderVoiceChat();
+  renderVoiceUndoSlot(appliedAny);
 }
 
 document.getElementById('mic-fab').addEventListener('click', openVoiceSheet);
 document.getElementById('voice-close').addEventListener('click', () => { stopListening(); voiceSheet.close(); });
+document.getElementById('voice-new-chat').addEventListener('click', () => {
+  clearVoiceHistory();
+  renderVoiceChat();
+  renderVoiceUndoSlot(false);
+});
+voiceUndoSlot.addEventListener('click', e => {
+  if (!e.target.closest('#voice-undo') || !undoSnapshot) return;
+  db = undoSnapshot; undoSnapshot = null; save(); render();
+  renderVoiceUndoSlot(false);
+  toast('Deshecho');
+});
 voiceSheet.addEventListener('close', stopListening);
 voiceMicBtn.addEventListener('click', () => {
   if (recognizing) stopListening();
@@ -1392,7 +1462,6 @@ voiceTextForm.addEventListener('submit', e => {
   const text = voiceTextInput.value.trim();
   if (!text) return;
   voiceTextInput.value = '';
-  voiceTranscriptEl.textContent = text;
   submitVoiceText(text);
 });
 
