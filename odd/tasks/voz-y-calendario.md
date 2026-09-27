@@ -92,7 +92,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 ### Phase 3 tasks
 
 - [x] T12 Voice conversation memory (client history + server multi-turn prompt + UI).
-- [ ] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
+- [x] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
 - [ ] T14 24-hour time picker everywhere ("16:00", never "4 PM"): the native
       `<input type=time>` follows the phone's 12h locale.
 - [ ] T15 Redeploy to Coolify + live checks (coordinator).
@@ -584,6 +584,59 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
   4/4 correct; stopped early (budget was ~6) since the core memory behavior and the
   discard-when-unrelated guard were both cleanly demonstrated.
+
+- T13 (commit pending): schedule slot shape extended to `{day,time,every?:1|2,anchor?}`;
+  missing `every` still means weekly everywhere (no data migration needed — `slotOccursOn`
+  defaults it to 1 at read time). New pure helpers `mondayOfIsoUtc`/`weeksBetweenIsoUtc`
+  compute entirely from ISO date strings via `Date.parse(...'Z')` (UTC), never the
+  runtime's local timezone, so DST transitions can't shift which week is "even". An
+  occurrence exists when `weeksBetweenIsoUtc(anchor, date) % 2 === 0`; verified this holds
+  for dates *before* the anchor too (JS's `%` on a negative even number of weeks is still
+  `0`/`-0`, both `=== 0`) with a standalone 8-case table (anchor week, ±1 week, ±2 weeks,
+  ±4 weeks — all correct) before wiring it into `appointmentsOn`'s slot filter, the only
+  place that needed to change (Hoy/Semana/Mes/Ahora/voice context all read through it, so
+  they all followed automatically — confirmed end to end, not just asserted: Hoy showed a
+  biweekly patient on the anchor Monday, correctly hid her the next Monday, and showed her
+  again 2 weeks later; Semana rendered exactly one block on an "on" week; Mes showed the
+  dot on 9/28 and 10/12 but not 10/5).
+
+  Editor: each slot row gained a segmented "Cada semana"/"Cada 2 semanas" control; picking
+  biweekly reveals "Próxima vez" with exactly the next 2 upcoming dates for the row's
+  current weekday (`nextWeekdayDates`), and changing the weekday regenerates them. On
+  reopening an existing biweekly slot, the control preselects whichever of those 2 dates
+  shares the stored anchor's parity (the two offered dates are always exactly 1 week apart
+  so exactly one of them always matches) — the pattern round-trips exactly even though the
+  literal anchor string may refresh to a more recent equivalent date. Patient list text:
+  "Lun 16:00 c/2 sem". Voice: `add_patient`/`update_patient` schedule validation now
+  accepts `every`/`anchor` (anchor required and must be a valid `YYYY-MM-DD` when
+  `every:2`); `buildVoiceContext` already forwarded the whole slot object, so no extra
+  client wiring was needed for the model to see or set them. Server prompt documents the
+  new fields plus both example phrasings from the task.
+
+  **Two more real `[hidden]`-vs-`display` bugs found while screenshotting the editor**
+  (same defect class as two found in T7/T12, now four total across the app): `.remove`
+  (the "Dar de baja" button) has always set `display: block` unconditionally, so it was
+  visibly showing on a brand-new, unsaved patient — pre-existing since T1, just never
+  screenshotted in that exact state before. `.slot-anchor`'s `display: flex` (added in
+  this same task) had the identical problem, showing "Próxima vez" by default on an
+  ordinary weekly slot. Both fixed with an explicit `.remove[hidden]`/`.slot-anchor[hidden]
+  { display: none; }`, and reverified with a fresh "Nuevo paciente" screenshot plus
+  `isHidden()` assertions (not just re-reading the CSS) showing both correctly hidden by
+  default.
+
+  Checks: `node --check app.js server.mjs` pass. Playwright/Chromium: editor round-trip
+  (create biweekly → reopen → frequency still "Cada 2 semanas", anchor select still
+  visible), Hoy/Semana/Mes integration above, `remove`/`slot-anchor` default-hidden
+  regression check. No console errors in any run.
+
+  **Real ai-router test**, 2 calls, the task's own example phrasings:
+
+  | # | Command | Result | Latency |
+  |---|---|---|---|
+  | 1 | "Lucía viene cada dos semanas los lunes a las 16, empieza este lunes" (today = Sun 27/9) | correct `add_patient`, schedule `[{day:1,time:"16:00",every:2,anchor:"2026-09-28"}]` — "este lunes" correctly resolved to tomorrow | 1.24s |
+  | 2 | "Tomás pasa a venir cada 15 días, la próxima es el jueves que viene" (existing Tue 15:00 patient) | correct `update_patient` on the right `patientId`, schedule `[{day:4,time:"15:00",every:2,anchor:"2026-10-01"}]` — kept his existing time, changed only the day/frequency/anchor | 782ms |
+
+  2/2 correct.
 
 ## Next step
 

@@ -106,6 +106,34 @@ function deletePayment(db, paymentId) {
   db.payments = db.payments.filter(p => p.id !== paymentId);
 }
 
+/** Monday (as "YYYY-MM-DD") of the week containing `isoDate`, computed with UTC date
+ *  math on the string alone so it never depends on the runtime's local timezone/DST. */
+function mondayOfIsoUtc(isoDate) {
+  const d = new Date(isoDate + 'T00:00:00Z');
+  const day = d.getUTCDay();
+  d.setUTCDate(d.getUTCDate() + (day === 0 ? -6 : 1 - day));
+  return d.toISOString().slice(0, 10);
+}
+
+/** Whole weeks between the Mondays of two ISO dates (negative when `isoB` is earlier). */
+function weeksBetweenIsoUtc(isoA, isoB) {
+  const a = Date.parse(mondayOfIsoUtc(isoA) + 'T00:00:00Z');
+  const b = Date.parse(mondayOfIsoUtc(isoB) + 'T00:00:00Z');
+  return Math.round((b - a) / (7 * 24 * 60 * 60 * 1000));
+}
+
+/** Whether a weekly/biweekly schedule slot produces an occurrence on `isoDate`.
+ *  every=1 (or missing): every matching weekday. every=2: only weeks whose Monday is an
+ *  even number of weeks away from anchor's Monday — works for dates before anchor too,
+ *  since JS's `%` on a negative even number is still `0`/`-0`. */
+function slotOccursOn(slot, isoDate) {
+  if (slot.day !== weekdayOf(isoDate)) return false;
+  const every = slot.every || 1;
+  if (every === 1) return true;
+  if (!slot.anchor) return true; // biweekly with no recorded anchor: fail open to weekly
+  return weeksBetweenIsoUtc(slot.anchor, isoDate) % 2 === 0;
+}
+
 /**
  * Computes the sorted list of appointments that fall on `isoDate`, combining the
  * patient's weekly schedule with one-off changes (move / cancel / extra), and
@@ -114,12 +142,11 @@ function deletePayment(db, paymentId) {
  * Returns: { patientId, date, time, moved: {fromDate,fromTime}|null, extra, status }[]
  */
 function appointmentsOn(db, isoDate) {
-  const weekday = weekdayOf(isoDate);
   const out = [];
 
   for (const p of db.patients) {
     if (p.since && isoDate < p.since) continue;
-    const slots = p.schedule.filter(sl => sl.day === weekday);
+    const slots = p.schedule.filter(sl => slotOccursOn(sl, isoDate));
     for (const slot of slots) {
       const removed = db.changes.some(c =>
         (c.kind === 'move' || c.kind === 'cancel') &&
@@ -221,7 +248,9 @@ function describeDate(isoStr) {
 /** Returns an error string if the action is invalid, or null if it may be applied. */
 function validateVoiceAction(db, a) {
   if (!a || typeof a !== 'object' || typeof a.type !== 'string') return 'acción inválida';
-  const scheduleOk = s => Array.isArray(s) && s.every(sl => sl && Number.isInteger(sl.day) && sl.day >= 0 && sl.day <= 6 && HHMM_RE.test(sl.time));
+  const scheduleOk = s => Array.isArray(s) && s.every(sl => sl && Number.isInteger(sl.day) && sl.day >= 0 && sl.day <= 6 && HHMM_RE.test(sl.time) &&
+    (sl.every === undefined || sl.every === 1 || sl.every === 2) &&
+    (sl.every !== 2 || (typeof sl.anchor === 'string' && ISO_DATE_RE.test(sl.anchor))));
   switch (a.type) {
     case 'mark_attendance':
       if (!findPatient(db, a.patientId)) return 'paciente inexistente';
@@ -597,7 +626,9 @@ function toast(msg) {
 
 function scheduleText(p) {
   if (!p.schedule.length) return 'Sin horario';
-  return [...p.schedule].sort(slotOrder).map(s => `${DAY_SHORT[s.day]} ${s.time}`).join(', ');
+  return [...p.schedule].sort(slotOrder)
+    .map(s => `${DAY_SHORT[s.day]} ${s.time}${(s.every || 1) === 2 ? ' c/2 sem' : ''}`)
+    .join(', ');
 }
 
 /* ---------- views ---------- */
@@ -979,16 +1010,65 @@ const editor = document.getElementById('editor');
 const form = document.getElementById('editor-form');
 const slotsEl = document.getElementById('slots');
 
+/** The next `count` dates (today or later) that fall on weekday `day` (0=Sun..6=Sat). */
+function nextWeekdayDates(day, count) {
+  let d = startOfDay(new Date());
+  while (d.getDay() !== day) d = addDays(d, 1);
+  const out = [];
+  for (let i = 0; i < count; i++) { out.push(iso(d)); d = addDays(d, 7); }
+  return out;
+}
+
+function anchorMatchesParity(anchor, candidateIso) {
+  return weeksBetweenIsoUtc(anchor, candidateIso) % 2 === 0;
+}
+
+/** Repopulates a biweekly slot row's "Próxima vez" options for its currently selected
+ *  weekday, preselecting whichever of the two offered dates matches the slot's existing
+ *  anchor (any past anchor with the same parity describes the same occurrence pattern). */
+function updateSlotAnchorOptions(div) {
+  const day = Number(div.querySelector('.slot-day').value);
+  const dates = nextWeekdayDates(day, 2);
+  const currentAnchor = div.dataset.anchor || '';
+  const preselect = (currentAnchor && dates.find(d => anchorMatchesParity(currentAnchor, d))) || dates[0];
+  div.querySelector('.slot-anchor-select').innerHTML = dates
+    .map(d => `<option value="${d}" ${d === preselect ? 'selected' : ''}>${describeDate(d)}</option>`).join('');
+}
+
+function setSlotFrequency(div, every) {
+  div.querySelectorAll('.seg-btn').forEach(b => b.classList.toggle('active', Number(b.dataset.every) === every));
+  div.querySelector('.slot-anchor').hidden = every !== 2;
+  if (every === 2) updateSlotAnchorOptions(div);
+}
+
 function slotRow(slot = { day: 1, time: '16:00' }) {
   const div = document.createElement('div');
   div.className = 'slot';
+  div.dataset.anchor = slot.anchor || '';
   div.innerHTML = `
-    <select aria-label="Día">${[1, 2, 3, 4, 5, 6, 0].map(d =>
-      `<option value="${d}" ${d === slot.day ? 'selected' : ''}>${DAYS[d]}</option>`).join('')}</select>
-    <input type="time" value="${slot.time}" required aria-label="Hora">
-    <button type="button" class="x" aria-label="Quitar horario">×</button>`;
+    <div class="slot-row">
+      <select class="slot-day" aria-label="Día">${[1, 2, 3, 4, 5, 6, 0].map(d =>
+        `<option value="${d}" ${d === slot.day ? 'selected' : ''}>${DAYS[d]}</option>`).join('')}</select>
+      <input type="time" class="slot-time" value="${slot.time}" required aria-label="Hora">
+      <button type="button" class="x" aria-label="Quitar horario">×</button>
+    </div>
+    <div class="slot-freq">
+      <div class="segmented" role="group" aria-label="Frecuencia">
+        <button type="button" class="seg-btn" data-every="1">Cada semana</button>
+        <button type="button" class="seg-btn" data-every="2">Cada 2 semanas</button>
+      </div>
+      <label class="slot-anchor" hidden>Próxima vez
+        <select class="slot-anchor-select" aria-label="Próxima vez"></select>
+      </label>
+    </div>`;
   div.querySelector('.x').onclick = () => div.remove();
+  div.querySelectorAll('.seg-btn').forEach(btn =>
+    btn.addEventListener('click', () => setSlotFrequency(div, Number(btn.dataset.every))));
+  div.querySelector('.slot-day').addEventListener('change', () => {
+    if (Number(div.querySelector('.seg-btn.active')?.dataset.every) === 2) updateSlotAnchorOptions(div);
+  });
   slotsEl.append(div);
+  setSlotFrequency(div, slot.every === 2 ? 2 : 1);
 }
 
 function openEditor(p) {
@@ -1018,7 +1098,14 @@ form.addEventListener('submit', e => {
   const price = Math.round(Number(form.elements.price.value));
   if (!name || !(price >= 0)) return;
   const schedule = [...slotsEl.querySelectorAll('.slot')]
-    .map(r => ({ day: Number(r.querySelector('select').value), time: r.querySelector('input').value }))
+    .map(r => {
+      const day = Number(r.querySelector('.slot-day').value);
+      const time = r.querySelector('.slot-time').value;
+      const every = Number(r.querySelector('.seg-btn.active')?.dataset.every) === 2 ? 2 : 1;
+      const slot = { day, time };
+      if (every === 2) { slot.every = 2; slot.anchor = r.querySelector('.slot-anchor-select').value; }
+      return slot;
+    })
     .filter(s => s.time);
 
   const existing = findPatient(db, state.editing);

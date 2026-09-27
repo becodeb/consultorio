@@ -417,11 +417,27 @@ dialog {
 dialog::backdrop { background: rgba(15, 25, 40, .45); }
 dialog form { padding: 22px 20px 20px; }
 dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
-.slots { display: grid; gap: 8px; margin: 6px 0 10px; }
-.slot { display: grid; grid-template-columns: 1fr 1fr 44px; gap: 8px; }
+.slots { display: grid; gap: 12px; margin: 6px 0 10px; }
+.slot {
+  display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 12px;
+}
+.slot-row { display: grid; grid-template-columns: 1fr 1fr 44px; gap: 8px; }
 .slot .x { border: 0; background: none; font-size: 22px; color: var(--muted); }
+.slot-freq { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.segmented {
+  display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-btn); padding: 2px;
+}
+.seg-btn {
+  border: 0; background: none; border-radius: var(--radius-btn); padding: 6px 12px;
+  font-size: 13px; font-weight: 700; color: var(--muted);
+}
+.seg-btn.active { background: var(--ink); color: var(--paper); }
+.slot-anchor { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; margin: 0; flex: 1; min-width: 160px; }
+.slot-anchor[hidden] { display: none; }
+.slot-anchor select { min-height: 38px; padding: 6px 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 .remove { display: block; margin: 14px auto 0; }
+.remove[hidden] { display: none; }
 .field-title { font-weight: 700; }
 
 .toast {
