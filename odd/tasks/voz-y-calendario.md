@@ -95,7 +95,10 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T13 Biweekly slots (data, appointmentsOn, editor UI, voice actions, calendars).
 - [x] T14 24-hour time picker everywhere ("16:00", never "4 PM"): the native
       `<input type=time>` follows the phone's 12h locale.
-- [ ] T15 Redeploy to Coolify + live checks (coordinator).
+- [x] T15 Redeploy to Coolify + live checks (coordinator): deploy `qkrqtdmgmr06atjxbr4x9imk`
+      of 8935f34 finished; `/` and `/api/health` 200, `/api/me` 401, served app.js sha256
+      equals local (3127f666b7ee). Auth rate limit restored to 10/min (env `AUTH_RATE_LIMIT`
+      only raised by the e2e suite). Parent re-ran e2e: 12/12.
 
 ## Acceptance criteria
 
