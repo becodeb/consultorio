@@ -110,11 +110,11 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ### Phase 4 tasks
 
-- [ ] T16 Dated schedule + price history (data v3 + migration, `scheduleOn`/`priceOn`,
+- [x] T16 Dated schedule + price history (data v3 + migration, `scheduleOn`/`priceOn`,
       attendance freezes the price effective on the session date).
-- [ ] T17 UI: scheduled changes in the patient editor, price history view, upcoming-change
+- [x] T17 UI: scheduled changes in the patient editor, price history view, upcoming-change
       markers.
-- [ ] T18 Voice actions `schedule_change` / `price_change` + history in context and queries.
+- [x] T18 Voice actions `schedule_change` / `price_change` + history in context and queries.
 - [ ] T19 Redeploy to Coolify + live checks (coordinator).
 
 ## Acceptance criteria
@@ -533,6 +533,137 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   volume were all removed afterward — nothing left running, no `compose up` was run against
   this box.
 
+- T16 (commit `f4d4f58`, part 1/3 of the phase-4 combined commit — see note below): data v3.
+  `emptyDb()` now `{version:3,...}`. `migrate()` rewritten to reach v3 from v1, v2, or an
+  already-v3-but-incomplete doc in one pass, idempotently: each patient's flat
+  `schedule`/`price` become `schedules:[{from,slots}]` / `prices:[{from,amount}]`, one
+  entry dated at `since` when missing, both arrays sorted, flat fields deleted. **Decision**:
+  did NOT keep `schedule`/`price` as derived compatibility fields — grepped every direct
+  read (`scheduleText`, `apptRowHtml`, `renderPacientes`, the editor, `buildVoiceContext`,
+  `validateVoiceAction`, `applyVoiceAction`, `markAttendance`) and routed all of them
+  through the new pure helpers instead, per the task's own stated preference. New helpers:
+  `scheduleOn(patient,isoDate)` / `priceOn(patient,isoDate)` (latest entry with
+  `from <= isoDate`, empty/0 before the first entry), `upcomingChanges(patient,todayIso)`
+  (future entries, oldest first), `setScheduleFrom`/`setPriceFrom` (insert/replace the
+  entry at exactly `from`, sorted, then dropped again if identical to the immediately
+  preceding entry — this dedupe is what makes a same-day re-save or an unchanged "now"
+  edit a no-op instead of forking history), `deleteDatedEntry` (refuses silently on a
+  today-or-past `from` — deleting is only ever offered for a not-yet-effective entry).
+  `appointmentsOn` now calls `scheduleOn(p, isoDate)` per day instead of reading
+  `p.schedule`, so Hoy/Semana/Mes naturally show the right slots for each date with no
+  extra logic. `markAttendance` now freezes `priceOn(p, date)` — the price effective ON
+  THE SESSION DATE — instead of `p.price`; this also fixed two display sites
+  (`apptRowHtml`'s row price and the Pagó quick-amount fallback) that were showing
+  *today's* price for a session on a different date, which would have been wrong even
+  before this phase once any price ever changed.
+
+- T17 (commit `f4d4f58`, part 2/3): patient editor gets a "Programar cambio" link under
+  Precio and under Horarios, each revealing a small "A partir de" date field (defaults to
+  tomorrow once shown; the field stays hidden/collapsed by default so the common "edit now"
+  case is unchanged). Saving without touching either link writes both price and schedule
+  from today; using one schedules that value from the chosen future date instead, leaving
+  today's effective value untouched. Below each field, an upcoming-changes list
+  ("Desde el 1/11: Jue 17:00" / "Desde el 1/11: $20.000") with a × that deletes that one
+  scheduled entry immediately (its own `save()`, not tied to the form's submit). Cuentas →
+  patient sheet gained "Precios" (newest-first, amount + diff vs. the previous entry as
+  "+$3.000 (+20%)", a "Programado" pill on a not-yet-effective entry) and a compact
+  "Horarios" history (since-date → slots, same pill). Pacientes list shows a small extra
+  line under a patient with an upcoming change ("$20.000 desde 1/11"). **CSS trap checked
+  again per this project's recurring pattern** (a `hidden`-toggled element beaten by an
+  unconditional `display` rule of equal-or-lower specificity from the UA/author origin
+  gap): added `.from-field[hidden]{display:none}` up front for the two new date fields,
+  confirmed necessary the same way as the four prior occurrences (T7/T13) — without it the
+  "A partir de" field stayed visible even while `hidden`.
+
+- T18 (commits `f4d4f58` + `67acb25`, part 3/3): two new voice actions,
+  `schedule_change{patientId,from,schedule}` and `price_change{patientId,from,amount}`,
+  built on the same `setScheduleFrom`/`setPriceFrom` as the editor (so "now" vs "scheduled"
+  semantics are identical whether she types, speaks, or uses the form). `update_patient`
+  with `price`/`schedule` keeps meaning "from today" — now implemented as `setPriceFrom`/
+  `setScheduleFrom(p, todayIso, ...)` instead of a flat assignment. `buildVoiceContext`
+  extended per patient with `priceHistory` (every `{from,amount}`, oldest first) and
+  `scheduledSchedule` (future schedule entries), alongside the already-date-resolved
+  current `price`/`schedule`; "First L." short-name privacy convention untouched.
+  `server.mjs`'s `systemPrompt()` documents both actions, the new context fields, the
+  "from" date resolution rule (same as any other date), and the bulk-percentage rule: one
+  `price_change` per active patient computed from *that patient's own* current price,
+  rounded to the nearest $500, with the reply required to state the rounding. The
+  pending-question completion rule (T12) now names `schedule_change`/`price_change`
+  explicitly among the actions a follow-up turn can complete.
+
+  **Real ai-router results** (8 calls, `AI_ROUTER_URL` default/production, against
+  `server.mjs` run standalone with a hand-built context — script discarded after use):
+
+  | # | Request | Result |
+  |---|---|---|
+  | 1 | "a partir del 1 de noviembre Martina viene los jueves a las 17" | `schedule_change` p1 from `2026-11-01`, Jue 17:00 — reply: "A partir del 1/11/2026 Martina L. pasa a venir los jueves a las 17:00." (6.8s, first call) |
+  | 2 | "desde el mes que viene Joaquín pasa a los martes a las 16" | `schedule_change` p3 from `2026-10-01` (correctly resolved "next month" against `today=2026-09-30`), Mar 16:00 (1.6s) |
+  | 3 | "a Sofía le aumento a veinte mil desde el lunes" | `price_change` p2 from `2026-10-05` (correct next Monday), amount 20000 (1.8s) |
+  | 4 | "desde noviembre todos los precios suben un 10%" | 8× `price_change`, one per active patient, from `2026-11-01` — checked every amount by hand against ×1.1 rounded to the nearest $500 (e.g. 18000→19800→**20000**, 17000→18700→**18500**): all 8 correct; reply explicitly states "montos redondeados al $500 más cercano" (2.2s) |
+  | 5 | "¿cuánto le cobraba a Martina en agosto?" | No action; reply: "$15.000 en agosto de 2026" — correct (her Aug-1 entry applies for the whole month) (1.0s) |
+  | 6 | "¿cuándo le aumenté a Tomás?" | No action; reply cites `15/07/2026` and `$17.000` — matches his `priceHistory` exactly (1.5s) |
+  | 7 | "le quiero cambiar el horario a Martina" (no prior history) | No action; reply asks "¿A qué día y horario...?" — correctly withheld for missing info (0.9s) |
+  | 8 | follow-up "a partir del 1 de diciembre, los jueves a las 18" (history = turn 7's exchange) | `schedule_change` p1 from `2026-12-01`, Jue 18:00 — the T12 multi-turn completion rule extended correctly to `schedule_change` with a real model, not just the mocked e2e scenario (1.7s) |
+
+  All 8/8 correct on the first try; no retries needed.
+
+- Checks (commit `4542a87`): 3 new `tools/e2e.mjs` scenarios, all previous 12 kept green
+  (**15/15 total**). `node --check app.js server.mjs tools/e2e.mjs` pass.
+  - **v2→v3 migration** (`scenarioV2ToV3Migration`): seeds v2-shaped data, forces the sync
+    that migration alone doesn't trigger (see bug note below), confirms `version:3`, exactly
+    one dated entry per patient at `since`, values preserved, flat fields gone.
+  - **Scheduled changes** (`scenarioScheduledChanges`, one patient, full flow): schedules a
+    future price+schedule change via the editor's new fields; confirms Hoy a week before
+    `from` still shows the old time, and marking that day freezes the OLD price; confirms
+    Hoy on `from` shows the new time/price, and marking freezes the NEW price; same
+    before/after check in Semana (`.week-block[aria-label*=...]`); Pacientes shows the
+    upcoming marker; Cuentas Precios shows both entries with the diff (`+$5.000 (+33%)`) and
+    a "Programado" pill, Horarios shows both dated entries; a real "now" price edit (no
+    "Programar cambio") adds a 3rd entry dated today without touching the original or the
+    already-scheduled one, and confirms an unchanged schedule re-save dedupes rather than
+    forking (2 entries, not 3); deleting the scheduled entries removes them from both the
+    UI list and the server, leaving only past history.
+  - **Voice** (`scenarioVoiceScheduledChanges`): mocks `/api/voice` returning one
+    `schedule_change` and one `price_change`, confirms both the applied-actions text and
+    the server data.
+
+  **Real bug found while running this** (fixed in the test, not the app — see below):
+  the first version of `scenarioV2ToV3Migration` read server data immediately after
+  `seedServer`'s reload and got `version:2`. Cause: `afterLogin`'s "server already has
+  data" branch (every phase's migration, not new to this one) runs `migrate()` purely
+  client-side and never calls `save()` — only the "brand-new account" branch pushes
+  eagerly. Every other seed-based scenario already masks this by performing some UI
+  mutation before reading server data; this one didn't, because the migration itself was
+  what was under test. Fixed the test (not the app, since this save-on-read-only-if-new
+  behavior is pre-existing and unrelated to phase 4) by forcing `window.save()` once via
+  `page.evaluate` before reading. A second bug, `[data-act="day"][data-step="1"]` timing
+  out in `scenarioScheduledChanges`: the editor submit doesn't change `state.view`, so the
+  day-stepper buttons (Hoy-only) didn't exist yet on the still-active Pacientes view —
+  fixed by adding the missing `goToView(page,'hoy')` after the save.
+
+  Screenshots refreshed and every one inspected by hand: `pacientes-editor.png` now seeds
+  Camila with a real scheduled price change first, so the "Desde el 19/10: $21.000" row
+  with its × renders in the shot (previously would have been an empty, untested list);
+  `cuentas-paciente.png` unchanged at the top (payment form), but a new
+  `cuentas-paciente-historial.png` scrolls to the Precios/Horarios sections (Bautista Ríos
+  given an upcoming price change first) — confirmed "8/10 · Programado · $18.000 ·
+  +$2.000 (+13%)" and "31/5 · $16.000" render correctly, plus "Horarios: Desde el 31/5:
+  Jue 19:00"; `semana.png` re-checked, pixel-identical to phase 3 (the `scheduleOn`
+  rewiring changed nothing observable when no schedule has a future entry). Caught and
+  fixed one real layout bug from the screenshot pass itself: the first `cuentas.png`
+  capture showed the "Cambios guardados" toast overlapping the patient list and bottom
+  nav, because the new pre-screenshot setup mutation (scheduling Bautista's price change)
+  left the 2.2s-visible toast still on screen at capture time; fixed by waiting for
+  `#toast` to lose its `.show` class before the next screenshot, not just a fixed delay.
+
+  **Commit granularity note**: T16/T17/T18's client-side code (data helpers, editor UI,
+  voice action handlers) ended up in one combined commit (`f4d4f58`) rather than three,
+  because they were implemented as one coherent, interdependent pass through `app.js` and
+  tested together — splitting them after the fact via `git add -p` would have meant
+  fabricating an artificial, untested intermediate state. `server.mjs`'s prompt changes
+  (genuinely separable, own file) and the Checks pass (e2e + screenshots) kept their own
+  commits, so the phase is 3 commits instead of 4.
+
 ## Deploy (T11, coordinator, 2026-09-27)
 
 - GitHub: `becodeb/consultorio` (public; history scanned for keys: clean).
@@ -732,5 +863,5 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ## Next step
 
-None — T12, T13, T14 and the Checks pass are all done. T15 (redeploy to Coolify + live
-checks) is explicitly the coordinator's own follow-up.
+None — T16, T17, T18 and the phase-4 Checks pass are all done. T19 (redeploy to Coolify +
+live checks) is explicitly the coordinator's own follow-up.
