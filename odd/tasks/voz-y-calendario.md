@@ -100,6 +100,23 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
       equals local (3127f666b7ee). Auth rate limit restored to 10/min (env `AUTH_RATE_LIMIT`
       only raised by the e2e suite). Parent re-ran e2e: 12/12.
 
+## Phase 4 scope (authorized by the user on 2026-09-30)
+
+- Scheduled schedule change: "from date X this patient comes at another time". Past
+  occurrences keep the old schedule; from X on, the new one applies (Hoy/Semana/Mes/Ahora).
+- Scheduled price change per patient from a date.
+- Price history: what each patient was charged over time (increases, when, how much).
+- All of it manageable by voice too.
+
+### Phase 4 tasks
+
+- [ ] T16 Dated schedule + price history (data v3 + migration, `scheduleOn`/`priceOn`,
+      attendance freezes the price effective on the session date).
+- [ ] T17 UI: scheduled changes in the patient editor, price history view, upcoming-change
+      markers.
+- [ ] T18 Voice actions `schedule_change` / `price_change` + history in context and queries.
+- [ ] T19 Redeploy to Coolify + live checks (coordinator).
+
 ## Acceptance criteria
 
 - Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
