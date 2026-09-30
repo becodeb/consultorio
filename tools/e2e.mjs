@@ -223,7 +223,7 @@ async function scenarioImportOnFirstLogin(browser, origin) {
       'pre-existing v1 data should be visible right after first login');
 
     const server = await readServerData(page);
-    assertEqual(server.data.version, 2, 'imported db must be v2 on the server');
+    assertEqual(server.data.version, 3, 'imported db must be migrated up to v3 on the server');
     assertTrue(server.data.patients.some(p => p.name === 'Martina López'), 'imported patient must reach the server, not just a local cache');
     assertTrue(!!server.data.patients[0].color, 'migrated patient should get a palette color');
     assertEqual(server.data.attendance.length, 1, 'migrated attendance count');
@@ -447,9 +447,10 @@ async function scenarioReschedule(browser, origin) {
 
     const server = await readServerData(page);
     const sofia = server.data.patients.find(p => p.name === 'Sofía Díaz');
-    assertEqual(sofia.schedule.length, 1, 'schedule length unchanged');
-    assertEqual(sofia.schedule[0].day, 2, 'schedule weekday unchanged');
-    assertEqual(sofia.schedule[0].time, '16:00', 'schedule time unchanged');
+    assertEqual(sofia.schedules.length, 1, 'schedule history length unchanged (a move is not a schedule edit)');
+    assertEqual(sofia.schedules[0].slots.length, 1, 'schedule slots length unchanged');
+    assertEqual(sofia.schedules[0].slots[0].day, 2, 'schedule weekday unchanged');
+    assertEqual(sofia.schedules[0].slots[0].time, '16:00', 'schedule time unchanged');
     const movedOnly = server.data.changes.filter(c => c.patientId === sofia.id);
     assertEqual(movedOnly.length, 1, 'exactly one change recorded for Sofía');
     assertEqual(movedOnly[0].kind, 'move', 'the change must be a move, not a schedule edit');
@@ -634,8 +635,9 @@ async function scenarioBiweekly(browser, origin) {
 
     const server = await readServerData(page);
     const camila = server.data.patients.find(p => p.name === 'Camila Torres');
-    assertEqual(camila.schedule[0].every, 2, 'every must survive an untouched editor round-trip');
-    assertTrue(ISO_DATE_RE.test(camila.schedule[0].anchor || ''), 'anchor must still be a valid date after round-trip');
+    assertEqual(camila.schedules.length, 1, 'an untouched "now" re-save must dedupe against the unchanged entry, not fork history');
+    assertEqual(camila.schedules[0].slots[0].every, 2, 'every must survive an untouched editor round-trip');
+    assertTrue(ISO_DATE_RE.test(camila.schedules[0].slots[0].anchor || ''), 'anchor must still be a valid date after round-trip');
   } finally {
     await context.close();
   }
@@ -662,7 +664,7 @@ async function scenarioTimePicker(browser, origin) {
     let server = await readServerData(page);
     let p = server.data.patients.find(x => x.name === 'Horario Test');
     assertTrue(!!p, 'the new patient must have been saved');
-    assertEqual(p.schedule[0].time, '16:00', 'the editor picker must save exactly "16:00"');
+    assertEqual(p.schedules[0].slots[0].time, '16:00', 'the editor picker must save exactly "16:00"');
 
     await goToView(page, 'hoy');
     const martinaRow = page.locator('li.row.appt', { hasText: 'Martina López' }).first();
@@ -681,6 +683,222 @@ async function scenarioTimePicker(browser, origin) {
     const move = server.data.changes.find(c => c.kind === 'move' && c.patientId === 'p1');
     assertTrue(!!move, 'a move change must have been recorded');
     assertEqual(move.toTime, '16:00', 'the reschedule picker must save exactly "16:00"');
+  } finally {
+    await context.close();
+  }
+}
+
+/* ---------- scenarios: phase 4 (dated schedule + price history) ---------- */
+
+/** buildSeed() is deliberately v2-shaped (flat price/schedule); every scenario that seeds
+ *  through it already exercises the v2->v3 migration path once it round-trips through the
+ *  server. This scenario makes that migration's data integrity an explicit, direct check. */
+async function scenarioV2ToV3Migration(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('v2v3');
+    await signup(page, origin, email);
+    const seed = buildSeed();
+    await seedServer(page, seed);
+
+    // seedServer's reload migrates v2 -> v3 client-side, but (like every prior migration)
+    // that alone never pushes to the server — only an actual mutation does. Every other
+    // seed-based scenario proves this in passing by performing one; here the migration
+    // itself is what's under test, so force the same push explicitly.
+    await page.evaluate(() => window.save());
+    await page.waitForTimeout(700);
+
+    const server = await readServerData(page);
+    assertEqual(server.data.version, 3, 'server data must be migrated up to v3 once synced');
+    const seedMartina = seed.patients.find(p => p.id === 'p1');
+    const martina = server.data.patients.find(p => p.id === 'p1');
+    assertTrue(martina.schedule === undefined && martina.price === undefined,
+      'flat schedule/price fields must be gone after migration');
+    assertEqual(martina.schedules.length, 1, 'a v2 schedule becomes exactly one dated entry');
+    assertEqual(martina.schedules[0].from, seedMartina.since, 'the single entry is dated at the patient\'s since');
+    assertEqual(martina.schedules[0].slots.length, 2, 'v2 schedule slots preserved');
+    assertEqual(martina.schedules[0].slots[0].time, '14:00', 'v2 slot time preserved');
+    assertEqual(martina.prices.length, 1, 'a v2 price becomes exactly one dated entry');
+    assertEqual(martina.prices[0].from, seedMartina.since, 'the single price entry is dated at since');
+    assertEqual(martina.prices[0].amount, 15000, 'v2 price value preserved');
+  } finally {
+    await context.close();
+  }
+}
+
+/** Covers T16 (scheduleOn/priceOn date-awareness, attendance price freeze, "now" vs
+ *  scheduled edits, history never rewritten) and T17 (editor upcoming-changes list +
+ *  delete, Pacientes marker, Cuentas Precios/Horarios history) together, since they share
+ *  one patient's setup. */
+async function scenarioScheduledChanges(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('scheduled');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    const futureFromDate = addDays(ANCHOR, 14); // Monday, 2 weeks out
+    const futureFrom = iso(futureFromDate);
+    const futureFromShort = `${futureFromDate.getDate()}/${futureFromDate.getMonth() + 1}`;
+
+    // --- Schedule a future price change ($15.000 -> $20.000) and schedule change
+    // (Monday 14:00 -> 15:00) for Martina, via the editor's "Programar cambio" fields. ---
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    assertEqual(await page.locator('#editor-form [name="price"]').inputValue(), '15000', 'editor must prefill today\'s effective price');
+
+    await page.click('#price-change-toggle');
+    await page.fill('#price-from-field input[name="priceFrom"]', futureFrom);
+    await page.fill('#editor-form [name="price"]', '20000');
+
+    await page.click('#schedule-change-toggle');
+    await page.fill('#schedule-from-field input[name="scheduleFrom"]', futureFrom);
+    const mondaySlot = page.locator('#slots .slot').first();
+    await mondaySlot.locator('.time-picker-hour').selectOption('15');
+    await mondaySlot.locator('.time-picker-min').selectOption('00');
+
+    await page.click('#editor-form button[type="submit"]');
+    await page.waitForTimeout(700);
+
+    // --- Hoy: a week before `from` still shows the old time/price; marking that session
+    // freezes the OLD price even though a newer one is already scheduled. ---
+    await goToView(page, 'hoy');
+    for (let i = 0; i < 7; i++) await page.click('[data-act="day"][data-step="1"]'); // -> Monday, 1 week out
+    await page.waitForTimeout(150);
+    let martinaRow = page.locator('li.row.appt', { hasText: 'Martina López' }).first();
+    assertEqual((await martinaRow.locator('.time').innerText()).trim(), '14:00', 'a week before the scheduled change, Hoy must still show the old time');
+    await martinaRow.locator('[data-act="mark"][data-status="present"]').click();
+    await page.waitForTimeout(700);
+    let server = await readServerData(page);
+    let att = server.data.attendance.find(a => a.patientId === 'p1' && a.date === iso(addDays(ANCHOR, 7)));
+    assertTrue(!!att, 'attendance must be recorded for the pre-change date');
+    assertEqual(att.price, 15000, 'marking a session before "from" must freeze the OLD price');
+
+    // --- On/after `from`, Hoy shows the new time/price, and marking freezes the NEW price. ---
+    for (let i = 0; i < 7; i++) await page.click('[data-act="day"][data-step="1"]'); // -> futureFrom
+    await page.waitForTimeout(150);
+    martinaRow = page.locator('li.row.appt', { hasText: 'Martina López' }).first();
+    assertEqual((await martinaRow.locator('.time').innerText()).trim(), '15:00', 'on the scheduled change date, Hoy must show the new time');
+    assertTrue((await martinaRow.locator('.sub').innerText()).includes('20.000'), 'on the scheduled change date, the row must show the new price');
+    await martinaRow.locator('[data-act="mark"][data-status="present"]').click();
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    att = server.data.attendance.find(a => a.patientId === 'p1' && a.date === futureFrom);
+    assertTrue(!!att, 'attendance must be recorded for the on/after-change date');
+    assertEqual(att.price, 20000, 'marking a session on/after "from" must freeze the NEW price');
+
+    // --- Semana: same before/after check, one week at a time from the anchor week. ---
+    await goToView(page, 'semana');
+    await page.click('[data-act="week"][data-step="1"]'); // -> week 1 (still old time)
+    await page.waitForTimeout(150);
+    assertTrue(await page.locator('.week-block[aria-label*="Martina López 14:00"]').count() >= 1,
+      'Semana one week out must still render the old time');
+    await page.click('[data-act="week"][data-step="1"]'); // -> week 2 (new time)
+    await page.waitForTimeout(150);
+    assertTrue(await page.locator('.week-block[aria-label*="Martina López 15:00"]').count() >= 1,
+      'Semana on the change week must render the new time');
+
+    // --- Pacientes: a small upcoming-change marker next to the current price. ---
+    await goToView(page, 'pacientes');
+    const pacientesRowText = await page.locator('button[data-act="edit"]', { hasText: 'Martina López' }).innerText();
+    assertTrue(pacientesRowText.includes('20.000') && pacientesRowText.includes(futureFromShort),
+      'Pacientes must show the upcoming price change as a small marker');
+
+    // --- Cuentas: Precios history (amount + diff, future entry marked "Programado") and a
+    // compact Horarios history. ---
+    await goToView(page, 'cuentas');
+    await page.locator('button[data-act="patient-accounts"]', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('#accounts-sheet[open]');
+    await page.waitForTimeout(150);
+    const priceHistoryText = await page.locator('#accounts-price-history').innerText();
+    assertTrue(priceHistoryText.includes('Precios'), 'accounts sheet must show a Precios section');
+    assertTrue(priceHistoryText.includes('20.000') && priceHistoryText.includes('15.000'), 'both price entries must be listed');
+    assertTrue(priceHistoryText.includes('+$5.000') && priceHistoryText.includes('33%'), 'the diff vs. the previous price must be shown');
+    assertTrue(priceHistoryText.includes('Programado'), 'the future price entry must be marked as scheduled');
+    const scheduleHistoryText = await page.locator('#accounts-schedule-history').innerText();
+    assertTrue(scheduleHistoryText.includes('Horarios') && scheduleHistoryText.includes('Programado'),
+      'accounts sheet must show a Horarios section with the scheduled entry marked');
+    await page.click('#accounts-close');
+
+    // --- Editing "now" (no "Programar cambio") inserts a from-today entry and never
+    // rewrites past history; the unchanged schedule re-save must dedupe, not fork. ---
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    assertTrue(await page.locator('#price-from-field').isHidden(), '"Programar cambio" must start collapsed on reopen');
+    await page.fill('#editor-form [name="price"]', '16000');
+    await page.click('#editor-form button[type="submit"]');
+    await page.waitForTimeout(700);
+
+    server = await readServerData(page);
+    const martinaAfterNowEdit = server.data.patients.find(p => p.id === 'p1');
+    const pricesAsc = [...martinaAfterNowEdit.prices].sort((a, b) => a.from.localeCompare(b.from));
+    assertEqual(pricesAsc.length, 3, 'a real "now" price edit must add one entry, not replace history');
+    assertEqual(pricesAsc[0].amount, 15000, 'the original (past) price entry must be untouched');
+    assertEqual(pricesAsc[1].from, ANCHOR_ISO, 'the new entry must be dated today');
+    assertEqual(pricesAsc[1].amount, 16000, 'the new entry must carry the edited value');
+    assertEqual(pricesAsc[2].amount, 20000, 'the already-scheduled future price must be untouched');
+    assertEqual(martinaAfterNowEdit.schedules.length, 2, 'resubmitting the unchanged schedule "now" must dedupe, not fork a redundant entry');
+
+    // --- Deleting a scheduled (future) entry removes it and only it. ---
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.click(`#price-upcoming [data-del-price="${futureFrom}"]`);
+    await page.click(`#schedule-upcoming [data-del-schedule="${futureFrom}"]`);
+    await page.waitForTimeout(200);
+    assertEqual(await page.locator('#price-upcoming .upcoming-item').count(), 0, 'the deleted price entry must disappear from the upcoming list');
+    assertEqual(await page.locator('#schedule-upcoming .upcoming-item').count(), 0, 'the deleted schedule entry must disappear from the upcoming list');
+    await page.click('#cancel');
+    await page.waitForTimeout(700);
+
+    server = await readServerData(page);
+    const martinaAfterDelete = server.data.patients.find(p => p.id === 'p1');
+    assertTrue(!martinaAfterDelete.prices.some(e => e.from === futureFrom), 'the scheduled price entry must be gone from the server');
+    assertTrue(!martinaAfterDelete.schedules.some(e => e.from === futureFrom), 'the scheduled schedule entry must be gone from the server');
+    assertEqual(martinaAfterDelete.prices.length, 2, 'only the scheduled entry must be removed, past history stays');
+  } finally {
+    await context.close();
+  }
+}
+
+async function scenarioVoiceScheduledChanges(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('voicesched');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    const futureFrom = iso(addDays(ANCHOR, 14));
+    await page.route('**/api/voice', async route => {
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          actions: [
+            { type: 'price_change', patientId: 'p2', from: futureFrom, amount: 21000 },
+            { type: 'schedule_change', patientId: 'p3', from: futureFrom, schedule: [{ day: 2, time: '18:00' }] },
+          ],
+          reply: 'Listo.',
+        }),
+      });
+    });
+
+    await page.click('#mic-fab');
+    await page.waitForSelector('#voice-sheet[open]');
+    await page.fill('#voice-text-input', 'desde el 12/10 Sofía pasa a 21000 y Joaquín viene los martes a las 18');
+    await page.click('#voice-text-form button[type="submit"]');
+    await page.waitForFunction(() => (document.querySelector('#voice-chat')?.innerHTML || '').includes('chat-done'));
+
+    const chatText = await page.locator('#voice-chat').innerText();
+    assertTrue(chatText.includes('21.000'), 'applied-actions text should confirm the new price');
+    assertTrue(chatText.includes('18:00'), 'applied-actions text should confirm the new time');
+
+    await page.waitForTimeout(700);
+    const server = await readServerData(page);
+    const sofia = server.data.patients.find(p => p.id === 'p2');
+    assertTrue(sofia.prices.some(e => e.from === futureFrom && e.amount === 21000), 'price_change must be applied to the server data');
+    const joaquin = server.data.patients.find(p => p.id === 'p3');
+    assertTrue(joaquin.schedules.some(e => e.from === futureFrom && e.slots[0].time === '18:00'), 'schedule_change must be applied to the server data');
   } finally {
     await context.close();
   }
@@ -715,6 +933,19 @@ async function takeScreenshots(browser, origin) {
       await goToView(page, 'mes');
       await page.screenshot({ path: path.join(SHOTS_DIR, 'mes.png') });
 
+      // Give the patient with a debt an upcoming price change first, so cuentas-paciente.png
+      // and its scrolled Precios/Horarios shot show real history, not just one flat entry.
+      await goToView(page, 'pacientes');
+      await page.locator('button.row', { hasText: 'Bautista Ríos' }).click();
+      await page.waitForSelector('dialog#editor[open]');
+      await page.click('#price-change-toggle');
+      await page.fill('#price-from-field input[name="priceFrom"]', iso(addDays(ANCHOR, 10)));
+      await page.fill('#editor-form [name="price"]', '18000');
+      await page.click('#editor-form button[type="submit"]');
+      await page.waitForTimeout(700);
+      // let the "Cambios guardados" toast finish before the next screenshot
+      await page.waitForFunction(() => !document.getElementById('toast')?.classList.contains('show'));
+
       await goToView(page, 'cuentas');
       await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas.png') });
 
@@ -723,6 +954,11 @@ async function takeScreenshots(browser, origin) {
       await page.waitForSelector('#accounts-sheet[open]');
       await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas-paciente.png') });
+      // Precios/Horarios history sit below the fold under the payment form; scroll the
+      // sheet down so the new phase-4 sections are actually visible in the screenshot.
+      await page.locator('#accounts-schedule-history').scrollIntoViewIfNeeded();
+      await page.waitForTimeout(100);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'cuentas-paciente-historial.png') });
       await page.click('#accounts-close');
 
       // voz.png: a real 2-turn conversation (pending question, then its answer) rendered
@@ -757,8 +993,20 @@ async function takeScreenshots(browser, origin) {
       await page.screenshot({ path: path.join(SHOTS_DIR, 'voz.png') });
       await page.click('#voice-close');
 
-      // pacientes-editor.png: a biweekly slot with the 24h picker, mid-edit.
+      // Give Camila an upcoming price change first, so pacientes-editor.png shows the
+      // "Programar cambio" upcoming list with a real scheduled entry in it.
       await goToView(page, 'pacientes');
+      await page.locator('button.row', { hasText: 'Camila Torres' }).click();
+      await page.waitForSelector('dialog#editor[open]');
+      await page.click('#price-change-toggle');
+      await page.fill('#price-from-field input[name="priceFrom"]', iso(addDays(ANCHOR, 21)));
+      await page.fill('#editor-form [name="price"]', '21000');
+      await page.click('#editor-form button[type="submit"]');
+      await page.waitForTimeout(700);
+      await page.waitForFunction(() => !document.getElementById('toast')?.classList.contains('show'));
+
+      // pacientes-editor.png: a biweekly slot with the 24h picker, plus the scheduled
+      // price change above, mid-edit.
       await page.locator('button.row', { hasText: 'Camila Torres' }).click();
       await page.waitForSelector('dialog#editor[open]');
       await page.waitForTimeout(150);
@@ -810,7 +1058,7 @@ async function main() {
     browser = await chromium.launch({ executablePath: CHROMIUM_PATH, args: ['--no-sandbox', '--disable-gpu'] });
 
     // Accounts + sync (phase 2)
-    await check('v1 data imports on first login and migrates to v2 on the server', () => scenarioImportOnFirstLogin(browser, origin));
+    await check('v1 data imports on first login and migrates to v3 on the server', () => scenarioImportOnFirstLogin(browser, origin));
     await check('session cookie keeps a second page logged in with the same server data', () => scenarioAuthPersistence(browser, origin));
     await check('a local mutation reaches the server as a new doc version', () => scenarioSyncReachesServer(browser, origin));
     await check('a stale write gets 409 and adopts the other device\'s server data', () => scenario409Conflict(browser, origin));
@@ -826,6 +1074,11 @@ async function main() {
     await check('voice history: 2nd request carries the 1st turn, chat renders both, Nueva conversación clears it', () => scenarioVoiceMemory(browser, origin));
     await check('biweekly slot: on/off weeks in Hoy/Semana/Mes, editor round-trip keeps every/anchor', () => scenarioBiweekly(browser, origin));
     await check('24h time picker: no native input[type=time], selecting 16:00 saves "16:00"', () => scenarioTimePicker(browser, origin));
+
+    // Phase 4: dated schedule + price history
+    await check('v2 seed data migrates to v3 with one dated entry per patient, values preserved', () => scenarioV2ToV3Migration(browser, origin));
+    await check('scheduled schedule/price change: date-aware Hoy/Semana, frozen attendance price, "now" vs scheduled edits, upcoming list + delete, Precios/Horarios history', () => scenarioScheduledChanges(browser, origin));
+    await check('voice schedule_change/price_change apply and sync', () => scenarioVoiceScheduledChanges(browser, origin));
 
     console.log('\nTaking screenshots...');
     await takeScreenshots(browser, origin);
