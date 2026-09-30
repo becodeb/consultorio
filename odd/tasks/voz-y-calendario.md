@@ -115,7 +115,9 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T17 UI: scheduled changes in the patient editor, price history view, upcoming-change
       markers.
 - [x] T18 Voice actions `schedule_change` / `price_change` + history in context and queries.
-- [ ] T19 Redeploy to Coolify + live checks (coordinator).
+- [x] T19 Redeploy to Coolify + live checks (coordinator): deploy `8seoav7uoe2am1l9fhtqw8fx`
+      of 1f07d43 finished; `/` and `/api/health` 200, `/api/me` 401, served app.js sha256
+      equals local (51a11e3108ba). Parent re-ran e2e: 15/15.
 
 ## Acceptance criteria
 
