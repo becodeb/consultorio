@@ -88,40 +88,132 @@ function mountTimePicker(container, initial) {
 }
 
 function emptyDb() {
-  return { version: 2, patients: [], changes: [], attendance: [], payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
+  return { version: 3, patients: [], changes: [], attendance: [], payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
 }
 
-/** Migrate a v1 payload ({patients,sessions}) to v2 in place. Returns v2 shape unchanged if already v2. */
+/**
+ * Migrates any older payload (v1 `{patients,sessions}`, v2 `{schedule,price}` per patient)
+ * up to v3 (`schedules`/`prices` dated-history arrays per patient). Idempotent: re-running
+ * it on an already-v3 doc just re-sorts each patient's history arrays and returns it as is.
+ */
 function migrate(raw) {
-  if (raw && raw.version === 2) {
-    if (!raw.changes) raw.changes = [];
-    if (!raw.attendance) raw.attendance = [];
-    if (!raw.payments) raw.payments = [];
-    if (!raw.settings) raw.settings = { sessionMinutes: DEFAULT_SESSION_MINUTES };
-    if (!raw.settings.sessionMinutes) raw.settings.sessionMinutes = DEFAULT_SESSION_MINUTES;
-    return raw;
+  let db;
+  if (raw && (raw.version === 2 || raw.version === 3)) {
+    db = raw;
+    if (!db.changes) db.changes = [];
+    if (!db.attendance) db.attendance = [];
+    if (!db.payments) db.payments = [];
+    if (!db.settings) db.settings = { sessionMinutes: DEFAULT_SESSION_MINUTES };
+    if (!db.settings.sessionMinutes) db.settings.sessionMinutes = DEFAULT_SESSION_MINUTES;
+  } else {
+    const legacy = (raw && Array.isArray(raw.patients) && Array.isArray(raw.sessions)) ? raw : { patients: [], sessions: [] };
+    const today = iso(new Date());
+    const patients = legacy.patients.map((p, i) => {
+      const own = legacy.sessions.filter(s => s.patientId === p.id).map(s => s.date).sort();
+      return {
+        id: p.id,
+        name: p.name,
+        price: p.price,
+        schedule: p.schedule || [],
+        active: p.active !== false,
+        color: PALETTE[i % PALETTE.length],
+        since: own[0] || today,
+      };
+    });
+    const attendance = legacy.sessions.map(s => {
+      const p = patients.find(x => x.id === s.patientId);
+      const wd = weekdayOf(s.date);
+      const slot = p ? p.schedule.find(sl => sl.day === wd) : null;
+      return { id: s.id, patientId: s.patientId, date: s.date, time: slot ? slot.time : '', status: 'present', price: s.price };
+    });
+    db = { version: 2, patients, changes: [], attendance, payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
   }
-  const legacy = (raw && Array.isArray(raw.patients) && Array.isArray(raw.sessions)) ? raw : { patients: [], sessions: [] };
-  const today = iso(new Date());
-  const patients = legacy.patients.map((p, i) => {
-    const own = legacy.sessions.filter(s => s.patientId === p.id).map(s => s.date).sort();
-    return {
-      id: p.id,
-      name: p.name,
-      price: p.price,
-      schedule: p.schedule || [],
-      active: p.active !== false,
-      color: PALETTE[i % PALETTE.length],
-      since: own[0] || today,
-    };
-  });
-  const attendance = legacy.sessions.map(s => {
-    const p = patients.find(x => x.id === s.patientId);
-    const wd = weekdayOf(s.date);
-    const slot = p ? p.schedule.find(sl => sl.day === wd) : null;
-    return { id: s.id, patientId: s.patientId, date: s.date, time: slot ? slot.time : '', status: 'present', price: s.price };
-  });
-  return { version: 2, patients, changes: [], attendance, payments: [], settings: { sessionMinutes: DEFAULT_SESSION_MINUTES } };
+
+  // v2 -> v3 per patient: one dated history entry from `since`. Skipped for a patient that
+  // already has schedules/prices (so re-migrating a v3 doc is a safe no-op for it).
+  for (const p of db.patients) {
+    if (!Array.isArray(p.schedules) || !p.schedules.length) {
+      p.schedules = [{ from: p.since || iso(new Date()), slots: p.schedule || [] }];
+    }
+    if (!Array.isArray(p.prices) || !p.prices.length) {
+      p.prices = [{ from: p.since || iso(new Date()), amount: p.price || 0 }];
+    }
+    p.schedules.sort((a, b) => a.from.localeCompare(b.from));
+    p.prices.sort((a, b) => a.from.localeCompare(b.from));
+    delete p.schedule;
+    delete p.price;
+  }
+  db.version = 3;
+  return db;
+}
+
+/** The slots effective on `isoDate`: the latest `schedules[]` entry with `from <= isoDate`.
+ *  Empty before the patient's first entry (should not normally happen — `since` is always
+ *  that first `from`). Past days keep the old slots; `isoDate` on/after a later entry's
+ *  `from` sees the new ones — this is the only thing `appointmentsOn` needs to know. */
+function scheduleOn(patient, isoDate) {
+  let best = null;
+  for (const e of patient.schedules || []) {
+    if (e.from <= isoDate && (!best || e.from > best.from)) best = e;
+  }
+  return best ? best.slots : [];
+}
+
+/** The price effective on `isoDate` — same "latest entry not after this date" rule as
+ *  `scheduleOn`. Attendance freezes this at marking time, so a past session always charges
+ *  what was valid that day even after a later price change. */
+function priceOn(patient, isoDate) {
+  let best = null;
+  for (const e of patient.prices || []) {
+    if (e.from <= isoDate && (!best || e.from > best.from)) best = e;
+  }
+  return best ? best.amount : 0;
+}
+
+/** Future-dated (`from > todayIso`) schedule/price entries, oldest first — what the editor
+ *  and Pacientes show as "upcoming changes". */
+function upcomingChanges(patient, todayIso) {
+  const byFrom = (a, b) => a.from.localeCompare(b.from);
+  return {
+    schedules: (patient.schedules || []).filter(e => e.from > todayIso).sort(byFrom),
+    prices: (patient.prices || []).filter(e => e.from > todayIso).sort(byFrom),
+  };
+}
+
+function scheduleEntriesEqual(a, b) {
+  const norm = slots => JSON.stringify([...slots].sort(slotOrder));
+  return norm(a.slots) === norm(b.slots);
+}
+
+/** Inserts/replaces the `schedules[]` entry for exactly `from` (never touches any other
+ *  entry, so past history is never implicitly rewritten), then drops it again if it turns
+ *  out identical to the entry immediately before it (no redundant history noise). `from`
+ *  is the caller's choice: today for "change it now", a future date to schedule a change. */
+function setScheduleFrom(patient, from, slots) {
+  let entries = (patient.schedules || []).filter(e => e.from !== from);
+  entries.push({ from, slots });
+  entries.sort((a, b) => a.from.localeCompare(b.from));
+  const idx = entries.findIndex(e => e.from === from);
+  if (idx > 0 && scheduleEntriesEqual(entries[idx - 1], entries[idx])) entries.splice(idx, 1);
+  patient.schedules = entries;
+}
+
+/** Same insert/replace/dedupe rule as `setScheduleFrom`, for `prices[]`. */
+function setPriceFrom(patient, from, amount) {
+  const rounded = Math.round(amount);
+  let entries = (patient.prices || []).filter(e => e.from !== from);
+  entries.push({ from, amount: rounded });
+  entries.sort((a, b) => a.from.localeCompare(b.from));
+  const idx = entries.findIndex(e => e.from === from);
+  if (idx > 0 && entries[idx - 1].amount === entries[idx].amount) entries.splice(idx, 1);
+  patient.prices = entries;
+}
+
+/** Removes one scheduled (future) history entry. Refuses silently on a today-or-past
+ *  `from` — deleting history is never offered, only undoing a not-yet-effective change. */
+function deleteDatedEntry(entries, from, todayIso) {
+  if (!(from > todayIso)) return entries;
+  return entries.filter(e => e.from !== from);
 }
 
 function findPatient(db, id) { return db.patients.find(p => p.id === id); }
@@ -188,7 +280,7 @@ function appointmentsOn(db, isoDate) {
 
   for (const p of db.patients) {
     if (p.since && isoDate < p.since) continue;
-    const slots = p.schedule.filter(sl => slotOccursOn(sl, isoDate));
+    const slots = scheduleOn(p, isoDate).filter(sl => slotOccursOn(sl, isoDate));
     for (const slot of slots) {
       const removed = db.changes.some(c =>
         (c.kind === 'move' || c.kind === 'cancel') &&
@@ -260,7 +352,10 @@ function buildVoiceContext(db) {
   for (let i = 1; i <= 7; i++) { const d = addDays(today, -i); prev7Days.push(`${iso(d)} ${DAYS[d.getDay()]}`); }
 
   const patients = db.patients.map(p => ({
-    id: p.id, name: shortName(p.name), price: p.price, schedule: p.schedule, active: p.active, balance: balanceOf(db, p.id),
+    id: p.id, name: shortName(p.name), active: p.active, balance: balanceOf(db, p.id),
+    price: priceOn(p, todayIso), schedule: scheduleOn(p, todayIso),
+    priceHistory: p.prices.map(e => ({ from: e.from, amount: e.amount })),
+    scheduledSchedule: upcomingChanges(p, todayIso).schedules.map(e => ({ from: e.from, slots: e.slots })),
   }));
 
   const weekStart = mondayOf(today);
@@ -326,6 +421,16 @@ function validateVoiceAction(db, a) {
       if (a.schedule !== undefined && !scheduleOk(a.schedule)) return 'horario inválido';
       if (a.name !== undefined && (typeof a.name !== 'string' || !a.name.trim())) return 'nombre inválido';
       return null;
+    case 'schedule_change':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (typeof a.from !== 'string' || !ISO_DATE_RE.test(a.from)) return 'fecha inválida';
+      if (!scheduleOk(a.schedule)) return 'horario inválido';
+      return null;
+    case 'price_change':
+      if (!findPatient(db, a.patientId)) return 'paciente inexistente';
+      if (typeof a.from !== 'string' || !ISO_DATE_RE.test(a.from)) return 'fecha inválida';
+      if (!(Number(a.amount) > 0)) return 'precio inválido';
+      return null;
     case 'deactivate_patient':
       if (!findPatient(db, a.patientId)) return 'paciente inexistente';
       return null;
@@ -359,6 +464,10 @@ function describeVoiceAction(db, a) {
       return `Paciente agregado: ${a.name}`;
     case 'update_patient':
       return `${name}: datos actualizados`;
+    case 'schedule_change':
+      return `${name}: desde el ${describeDateShort(a.from)} viene ${slotsText(a.schedule)}`;
+    case 'price_change':
+      return `${name}: ${moneyFmt(Number(a.amount))} desde el ${describeDateShort(a.from)}`;
     case 'deactivate_patient':
       return `${name}: dado de baja`;
     case 'record_payment': {
@@ -387,19 +496,29 @@ function applyVoiceAction(db, a) {
     case 'add_once':
       addExtraOccurrence(db, a.patientId, a.date, a.time);
       return;
-    case 'add_patient':
+    case 'add_patient': {
+      const since = iso(new Date());
       db.patients.push({
-        id: uid(), name: a.name.trim(), price: Math.round(Number(a.price)),
-        schedule: a.schedule || [], active: true, color: nextColor(db), since: iso(new Date()),
+        id: uid(), name: a.name.trim(), active: true, color: nextColor(db), since,
+        schedules: [{ from: since, slots: a.schedule || [] }],
+        prices: [{ from: since, amount: Math.round(Number(a.price)) }],
       });
       return;
+    }
     case 'update_patient': {
       const p = findPatient(db, a.patientId);
+      const todayIso = iso(new Date());
       if (a.name !== undefined) p.name = a.name.trim();
-      if (a.price !== undefined) p.price = Math.round(Number(a.price));
-      if (a.schedule !== undefined) p.schedule = a.schedule;
+      if (a.price !== undefined) setPriceFrom(p, todayIso, Number(a.price));
+      if (a.schedule !== undefined) setScheduleFrom(p, todayIso, a.schedule);
       return;
     }
+    case 'schedule_change':
+      setScheduleFrom(findPatient(db, a.patientId), a.from, a.schedule);
+      return;
+    case 'price_change':
+      setPriceFrom(findPatient(db, a.patientId), a.from, Number(a.amount));
+      return;
     case 'deactivate_patient':
       findPatient(db, a.patientId).active = false;
       return;
@@ -452,7 +571,7 @@ function addExtraOccurrence(db, patientId, date, time) {
 function markAttendance(db, patientId, date, time, status) {
   db.attendance = db.attendance.filter(a => !(a.patientId === patientId && a.date === date && a.time === time));
   const p = findPatient(db, patientId);
-  const price = status === 'present' ? (p ? p.price : 0) : 0;
+  const price = status === 'present' ? (p ? priceOn(p, date) : 0) : 0;
   db.attendance.push({ id: uid(), patientId, date, time: time || '', status, price });
 }
 
@@ -666,11 +785,21 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-function scheduleText(p) {
-  if (!p.schedule.length) return 'Sin horario';
-  return [...p.schedule].sort(slotOrder)
+function slotsText(slots) {
+  if (!slots.length) return 'Sin horario';
+  return [...slots].sort(slotOrder)
     .map(s => `${DAY_SHORT[s.day]} ${s.time}${(s.every || 1) === 2 ? ' c/2 sem' : ''}`)
     .join(', ');
+}
+
+function scheduleText(p) {
+  return slotsText(scheduleOn(p, iso(new Date())));
+}
+
+/** Compact "1/11" day/month label, used for scheduled-change markers. */
+function describeDateShort(isoStr) {
+  const d = dateFromIso(isoStr);
+  return `${d.getDate()}/${d.getMonth() + 1}`;
 }
 
 /* ---------- views ---------- */
@@ -733,7 +862,7 @@ function apptRowHtml(a) {
   let payHtml = '';
   if (status === 'present') {
     const attRec = db.attendance.find(x => x.patientId === a.patientId && x.date === a.date && x.time === a.time);
-    const sessionPrice = attRec ? attRec.price : p.price;
+    const sessionPrice = attRec ? attRec.price : priceOn(p, a.date);
     const paidToday = db.payments.some(x => x.patientId === a.patientId && x.date === a.date);
     payHtml = paidToday
       ? `<span class="paid-tag">Pagado</span>`
@@ -750,7 +879,7 @@ function apptRowHtml(a) {
       <span class="dot" style="background:${p.color}"></span>
       <span class="time">${a.time || '—'}</span>
       <span class="who"><span class="name">${esc(p.name)}</span>
-        <div class="sub">${moneyFmt(p.price)}</div>${movedBadge}</span>
+        <div class="sub">${moneyFmt(priceOn(p, a.date))}</div>${movedBadge}</span>
       <button class="icon-btn" data-act="reprogramar" data-id="${p.id}" data-time="${a.time}" aria-label="Reprogramar a ${esc(p.name)}">${KEBAB}</button>
     </div>
     <div class="row-actions">${actionsHtml}</div>
@@ -947,6 +1076,16 @@ function renderMes() {
   app.innerHTML = html;
 }
 
+/** Small "$20.000 desde 1/11" / "Jue 17:00 desde 1/11" markers for the Pacientes list,
+ *  one per upcoming price/schedule change (soonest only, to keep the row compact). */
+function upcomingMarkerHtml(p, todayIso) {
+  const up = upcomingChanges(p, todayIso);
+  let html = '';
+  if (up.prices.length) html += `<div class="sub upcoming">${moneyFmt(up.prices[0].amount)} desde ${describeDateShort(up.prices[0].from)}</div>`;
+  if (up.schedules.length) html += `<div class="sub upcoming">${slotsText(up.schedules[0].slots)} desde ${describeDateShort(up.schedules[0].from)}</div>`;
+  return html;
+}
+
 function renderPacientes() {
   const active = db.patients.filter(p => p.active).sort(byName);
   const archived = db.patients.filter(p => !p.active).sort(byName);
@@ -956,11 +1095,12 @@ function renderPacientes() {
     <div style="height:16px"></div>`;
 
   if (active.length) {
+    const todayIso = iso(new Date());
     html += '<ul class="list">' + active.map(p => `<li>
       <button class="row" data-act="edit" data-id="${p.id}">
         <span class="who"><span class="name">${esc(p.name)}</span>
-          <div class="sub">${scheduleText(p)}</div></span>
-        <span class="amount">${moneyFmt(p.price)}</span>
+          <div class="sub">${scheduleText(p)}</div>${upcomingMarkerHtml(p, todayIso)}</span>
+        <span class="amount">${moneyFmt(priceOn(p, todayIso))}</span>
       </button></li>`).join('') + '</ul>';
   } else {
     html += '<div class="empty">Todavía no hay pacientes.</div>';
@@ -1115,13 +1255,79 @@ function slotRow(slot = { day: 1, time: '16:00' }) {
   setSlotFrequency(div, slot.every === 2 ? 2 : 1);
 }
 
+const priceFromField = document.getElementById('price-from-field');
+const scheduleFromField = document.getElementById('schedule-from-field');
+
+/** Upcoming (future-dated) price entries for the patient being edited, with a delete (×)
+ *  per row — deleting is only ever offered for a not-yet-effective scheduled change. */
+function renderPriceUpcoming(p) {
+  const el = document.getElementById('price-upcoming');
+  if (!p) { el.innerHTML = ''; return; }
+  const todayIso = iso(new Date());
+  el.innerHTML = upcomingChanges(p, todayIso).prices.map(e => `<div class="upcoming-item">
+    <span>Desde el ${describeDateShort(e.from)}: ${moneyFmt(e.amount)}</span>
+    <button type="button" class="x" data-del-price="${e.from}" aria-label="Quitar cambio programado">×</button>
+  </div>`).join('');
+}
+
+function renderScheduleUpcoming(p) {
+  const el = document.getElementById('schedule-upcoming');
+  if (!p) { el.innerHTML = ''; return; }
+  const todayIso = iso(new Date());
+  el.innerHTML = upcomingChanges(p, todayIso).schedules.map(e => `<div class="upcoming-item">
+    <span>Desde el ${describeDateShort(e.from)}: ${slotsText(e.slots)}</span>
+    <button type="button" class="x" data-del-schedule="${e.from}" aria-label="Quitar cambio programado">×</button>
+  </div>`).join('');
+}
+
+document.getElementById('price-upcoming').addEventListener('click', e => {
+  const btn = e.target.closest('[data-del-price]');
+  if (!btn) return;
+  const p = findPatient(db, state.editing);
+  if (!p) return;
+  p.prices = deleteDatedEntry(p.prices, btn.dataset.delPrice, iso(new Date()));
+  save(); renderPriceUpcoming(p); render();
+});
+document.getElementById('schedule-upcoming').addEventListener('click', e => {
+  const btn = e.target.closest('[data-del-schedule]');
+  if (!btn) return;
+  const p = findPatient(db, state.editing);
+  if (!p) return;
+  p.schedules = deleteDatedEntry(p.schedules, btn.dataset.delSchedule, iso(new Date()));
+  save(); renderScheduleUpcoming(p); render();
+});
+
+document.getElementById('price-change-toggle').onclick = () => {
+  priceFromField.hidden = !priceFromField.hidden;
+  if (!priceFromField.hidden) {
+    const todayIso = iso(new Date());
+    form.elements.priceFrom.min = todayIso;
+    if (!form.elements.priceFrom.value) form.elements.priceFrom.value = iso(addDays(new Date(), 1));
+  }
+};
+document.getElementById('schedule-change-toggle').onclick = () => {
+  scheduleFromField.hidden = !scheduleFromField.hidden;
+  if (!scheduleFromField.hidden) {
+    const todayIso = iso(new Date());
+    form.elements.scheduleFrom.min = todayIso;
+    if (!form.elements.scheduleFrom.value) form.elements.scheduleFrom.value = iso(addDays(new Date(), 1));
+  }
+};
+
 function openEditor(p) {
   state.editing = p ? p.id : null;
   document.getElementById('editor-title').textContent = p ? 'Editar paciente' : 'Nuevo paciente';
   form.elements.patientName.value = p ? p.name : '';
-  form.elements.price.value = p ? p.price : '';
+  const todayIso = iso(new Date());
+  form.elements.price.value = p ? priceOn(p, todayIso) : '';
+  form.elements.priceFrom.value = '';
+  priceFromField.hidden = true;
+  form.elements.scheduleFrom.value = '';
+  scheduleFromField.hidden = true;
   slotsEl.innerHTML = '';
-  (p ? p.schedule : [undefined]).forEach(s => slotRow(s));
+  (p ? scheduleOn(p, todayIso) : [undefined]).forEach(s => slotRow(s));
+  renderPriceUpcoming(p);
+  renderScheduleUpcoming(p);
   document.getElementById('remove').hidden = !p;
   editor.showModal();
   if (!p) form.elements.patientName.focus();
@@ -1152,9 +1358,21 @@ form.addEventListener('submit', e => {
     })
     .filter(s => s.time);
 
+  const todayIso = iso(new Date());
+  const priceFrom = (!priceFromField.hidden && form.elements.priceFrom.value) ? form.elements.priceFrom.value : todayIso;
+  const scheduleFrom = (!scheduleFromField.hidden && form.elements.scheduleFrom.value) ? form.elements.scheduleFrom.value : todayIso;
+  if (priceFrom < todayIso || scheduleFrom < todayIso) { toast('La fecha tiene que ser hoy o futura'); return; }
+
   const existing = findPatient(db, state.editing);
-  if (existing) Object.assign(existing, { name, price, schedule });
-  else db.patients.push({ id: uid(), name, price, schedule, active: true, color: nextColor(db), since: iso(new Date()) });
+  let patient = existing;
+  if (!patient) {
+    patient = { id: uid(), name, active: true, color: nextColor(db), since: todayIso, schedules: [], prices: [] };
+    db.patients.push(patient);
+  } else {
+    patient.name = name;
+  }
+  setPriceFrom(patient, priceFrom, price);
+  setScheduleFrom(patient, scheduleFrom, schedule);
   save(); editor.close(); render();
   toast(existing ? 'Cambios guardados' : 'Paciente agregado');
 });
@@ -1334,6 +1552,61 @@ function renderAccountsHistory(patientId) {
   document.getElementById('accounts-history').innerHTML = html;
 }
 
+function priceDiffText(curr, prev) {
+  const diff = curr - prev;
+  if (diff === 0) return '';
+  const pct = prev ? Math.round((diff / prev) * 100) : 0;
+  const sign = diff > 0 ? '+' : '';
+  return `${sign}${moneyFmt(diff)} (${sign}${pct}%)`;
+}
+
+/** Price history, newest first: date, amount, diff vs the previous entry; a future
+ *  (not-yet-effective) entry is marked "Programado". */
+function renderPriceHistory(patientId) {
+  const p = findPatient(db, patientId);
+  const el = document.getElementById('accounts-price-history');
+  if (!p) { el.innerHTML = ''; return; }
+  const todayIso = iso(new Date());
+  const asc = [...p.prices].sort((a, b) => a.from.localeCompare(b.from));
+  const rowsAsc = asc.map((e, i) => {
+    const prev = i > 0 ? asc[i - 1] : null;
+    const diff = prev ? priceDiffText(e.amount, prev.amount) : '';
+    const programado = e.from > todayIso ? '<span class="moved-pill">Programado</span>' : '';
+    return `<li class="row">
+      <span class="who"><span class="name">${describeDateShort(e.from)}</span>${diff ? `<div class="diff">${diff}</div>` : ''}</span>
+      ${programado}
+      <span class="amount">${moneyFmt(e.amount)}</span>
+    </li>`;
+  });
+  let html = '<div class="field-title">Precios</div>';
+  html += rowsAsc.length
+    ? `<ul class="list small-list">${rowsAsc.slice().reverse().join('')}</ul>`
+    : '<div class="empty small">Sin historial</div>';
+  el.innerHTML = html;
+}
+
+/** Compact schedule history: since date -> slots, newest first. */
+function renderScheduleHistory(patientId) {
+  const p = findPatient(db, patientId);
+  const el = document.getElementById('accounts-schedule-history');
+  if (!p) { el.innerHTML = ''; return; }
+  const todayIso = iso(new Date());
+  const desc = [...p.schedules].sort((a, b) => b.from.localeCompare(a.from));
+  const rows = desc.map(e => {
+    const programado = e.from > todayIso ? '<span class="moved-pill">Programado</span>' : '';
+    return `<li class="row">
+      <span class="who"><span class="name">Desde el ${describeDateShort(e.from)}</span>
+        <div class="sub">${slotsText(e.slots)}</div></span>
+      ${programado}
+    </li>`;
+  });
+  let html = '<div class="field-title">Horarios</div>';
+  html += rows.length
+    ? `<ul class="list small-list">${rows.join('')}</ul>`
+    : '<div class="empty small">Sin historial</div>';
+  el.innerHTML = html;
+}
+
 function openAccountsSheet(patientId) {
   const p = findPatient(db, patientId);
   if (!p) return;
@@ -1361,6 +1634,8 @@ function openAccountsSheet(patientId) {
   document.getElementById('quick-amounts').innerHTML = quickHtml;
 
   renderAccountsHistory(patientId);
+  renderPriceHistory(patientId);
+  renderScheduleHistory(patientId);
   accountsSheet.showModal();
 }
 

@@ -65,9 +65,20 @@
     <label>Precio por sesión
       <input name="price" type="number" inputmode="numeric" min="0" step="1" required>
     </label>
+    <button type="button" class="link-btn" id="price-change-toggle">Programar cambio</button>
+    <label class="from-field" id="price-from-field" hidden>A partir de
+      <input type="date" name="priceFrom">
+    </label>
+    <div id="price-upcoming" class="upcoming-list"></div>
+
     <div class="field-title">Horarios</div>
     <div class="slots" id="slots"></div>
     <button type="button" class="btn" id="add-slot">Agregar horario</button>
+    <button type="button" class="link-btn" id="schedule-change-toggle">Programar cambio</button>
+    <label class="from-field" id="schedule-from-field" hidden>A partir de
+      <input type="date" name="scheduleFrom">
+    </label>
+    <div id="schedule-upcoming" class="upcoming-list"></div>
     <div class="dialog-actions">
       <button type="button" class="btn ghost" id="cancel">Cancelar</button>
       <button type="submit" class="btn primary">Guardar</button>
@@ -111,6 +122,8 @@
       <button type="submit" class="btn primary wide">Registrar pago</button>
     </form>
     <div id="accounts-history"></div>
+    <div id="accounts-price-history"></div>
+    <div id="accounts-schedule-history"></div>
     <div class="dialog-actions">
       <button type="button" class="btn ghost" id="accounts-close">Cerrar</button>
     </div>
