@@ -3,7 +3,8 @@ FROM node:24-alpine
 WORKDIR /app
 
 # Static assets only (no npm dependencies — server.mjs uses Node built-ins only).
-COPY index.html styles.css app.js server.mjs README.md ./
+COPY index.html styles.css app.js server.mjs README.md manifest.webmanifest sw.js ./
+COPY icons ./icons
 
 # Cloudflare caches .css/.js for hours after a deploy; index.html carries a `?v=__V__`
 # query string on those two asset URLs so each build gets a fresh, cache-busted version.

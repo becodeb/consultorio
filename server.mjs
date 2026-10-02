@@ -281,7 +281,8 @@ async function serveStatic(req, res, pathname) {
     const ext = path.extname(resolved);
     const body = await fs.readFile(resolved);
     const headers = { 'content-type': CONTENT_TYPES[ext] || 'application/octet-stream', 'content-length': body.length };
-    if (ext === '.html') headers['cache-control'] = 'no-cache';
+    // HTML, the manifest and the service worker must be re-checked on every load.
+    if (ext === '.html' || ext === '.webmanifest' || rel === 'sw.js') headers['cache-control'] = 'no-cache';
     res.writeHead(200, headers);
     res.end(req.method === 'HEAD' ? undefined : body);
   } catch {
