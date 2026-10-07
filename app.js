@@ -327,6 +327,42 @@ function findOccurrence(db, patientId, isoDate) {
   return appointmentsOn(db, isoDate).find(a => a.patientId === patientId) || null;
 }
 
+/**
+ * This patient's occurrences over the next `days` days (today inclusive), for the patient
+ * editor's "Próximas sesiones" list. Unlike `appointmentsOn` — which simply omits a
+ * cancelled regular slot, since it's not meant to happen — a cancelled slot is INCLUDED
+ * here (marked `kind:'cancelled'`) so it can be shown and undone. A moved slot is listed
+ * once, at its new date (`kind:'moved'`), not at the original one.
+ */
+function upcomingOccurrences(db, patientId, todayIso, days = 21) {
+  const p = findPatient(db, patientId);
+  if (!p) return [];
+  const today = dateFromIso(todayIso);
+  const endIso = iso(addDays(today, days));
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const dISO = iso(addDays(today, i));
+    if (p.since && dISO < p.since) continue;
+    const slots = scheduleOn(p, dISO).filter(sl => slotOccursOn(sl, dISO));
+    for (const slot of slots) {
+      const moved = db.changes.find(c => c.kind === 'move' && c.patientId === patientId && c.date === dISO && c.time === slot.time);
+      if (moved) continue; // represented once, at its toDate, below
+      const cancelled = db.changes.find(c => c.kind === 'cancel' && c.patientId === patientId && c.date === dISO && c.time === slot.time);
+      out.push({ date: dISO, time: slot.time, kind: cancelled ? 'cancelled' : 'regular', changeId: cancelled ? cancelled.id : null });
+    }
+  }
+  for (const c of db.changes) {
+    if (c.patientId !== patientId) continue;
+    if (c.kind === 'move' && c.toDate >= todayIso && c.toDate < endIso) {
+      out.push({ date: c.toDate, time: c.toTime, kind: 'moved', fromDate: c.date, fromTime: c.time, changeId: c.id });
+    } else if (c.kind === 'extra' && c.date >= todayIso && c.date < endIso) {
+      out.push({ date: c.date, time: c.time, kind: 'extra', changeId: c.id });
+    }
+  }
+  out.sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')));
+  return out;
+}
+
 /** Builds the JSON context sent to /api/voice alongside the spoken/typed text. */
 /** "Martina López" -> "Martina L." — patients are children, so only a first name + surname
  *  initial goes to the (partly third-party, free-tier) LLM, never a full name. */
@@ -569,6 +605,13 @@ function cancelOccurrence(db, patientId, date) {
 /** Adds an extra (one-off) session for a patient on a date/time outside their usual schedule. */
 function addExtraOccurrence(db, patientId, date, time) {
   db.changes.push({ id: uid(), patientId, kind: 'extra', date, time });
+}
+
+/** Removes one one-off change (move/cancel/extra) by id — the "Deshacer" for a single
+ *  occurrence in the patient editor's "Próximas sesiones" list. Restores the regular
+ *  occurrence (or simply removes an extra one); the fixed schedule is never touched. */
+function removeChange(db, changeId) {
+  db.changes = db.changes.filter(c => c.id !== changeId);
 }
 
 /** Marks/updates attendance for one occurrence. Price is frozen at the patient's current price. */
@@ -1318,6 +1361,32 @@ document.getElementById('schedule-change-toggle').onclick = () => {
   }
 };
 
+function sessionRowHtml(o) {
+  const changed = o.kind !== 'regular';
+  let subLine = '';
+  if (o.kind === 'moved') subLine = `movida, antes ${describeDate(o.fromDate)} ${o.fromTime}`;
+  else if (o.kind === 'extra') subLine = 'sesión extra';
+  else if (o.kind === 'cancelled') subLine = 'no viene';
+  const actionsHtml = changed
+    ? `<button type="button" class="btn ghost small" data-act="session-undo" data-change-id="${o.changeId}">Deshacer</button>`
+    : `<button type="button" class="btn ghost small" data-act="session-move" data-date="${o.date}" data-time="${o.time}">Mover</button>
+       <button type="button" class="btn ghost small" data-act="session-skip" data-date="${o.date}" data-time="${o.time}">No viene</button>`;
+  return `<li class="row session-row ${o.kind === 'cancelled' ? 'cancelled' : ''}">
+    <span class="who"><span class="name">${describeDate(o.date)} ${o.time}</span>${subLine ? `<div class="sub">${subLine}</div>` : ''}</span>
+    ${actionsHtml}
+  </li>`;
+}
+
+/** Next 3 weeks of this patient's occurrences, for the editor's "Próximas sesiones". */
+function renderUpcomingSessions(patientId) {
+  const el = document.getElementById('sessions-list');
+  if (!patientId) { el.innerHTML = ''; return; }
+  const occurrences = upcomingOccurrences(db, patientId, iso(new Date()), 21);
+  el.innerHTML = occurrences.length
+    ? `<ul class="list small-list">${occurrences.map(sessionRowHtml).join('')}</ul>`
+    : '<div class="empty small">Sin sesiones próximas</div>';
+}
+
 function openEditor(p) {
   state.editing = p ? p.id : null;
   document.getElementById('editor-title').textContent = p ? 'Editar paciente' : 'Nuevo paciente';
@@ -1333,12 +1402,60 @@ function openEditor(p) {
   renderPriceUpcoming(p);
   renderScheduleUpcoming(p);
   document.getElementById('remove').hidden = !p;
+  document.getElementById('sessions-toggle').hidden = !p;
+  document.getElementById('sessions-section').hidden = true;
+  document.getElementById('sessions-add-fields').hidden = true;
+  renderUpcomingSessions(p ? p.id : null);
   editor.showModal();
   if (!p) form.elements.patientName.focus();
 }
 
 document.getElementById('add-slot').onclick = () => slotRow();
 document.getElementById('cancel').onclick = () => editor.close();
+document.getElementById('sessions-toggle').onclick = () => {
+  const section = document.getElementById('sessions-section');
+  section.hidden = !section.hidden;
+};
+const sessionsAddPicker = mountTimePicker(document.getElementById('sessions-add-picker'), '16:00');
+document.getElementById('sessions-add-toggle').onclick = () => {
+  const field = document.getElementById('sessions-add-fields');
+  field.hidden = !field.hidden;
+  if (!field.hidden) {
+    const todayIso = iso(new Date());
+    const dateInput = document.getElementById('extra-date');
+    dateInput.min = todayIso;
+    if (!dateInput.value) dateInput.value = todayIso;
+  }
+};
+document.getElementById('sessions-add-confirm').onclick = () => {
+  const patientId = state.editing;
+  if (!patientId) return;
+  const date = document.getElementById('extra-date').value;
+  const time = sessionsAddPicker.value;
+  if (!ISO_DATE_RE.test(date) || !HHMM_RE.test(time)) { toast('Fecha u hora inválida'); return; }
+  addExtraOccurrence(db, patientId, date, time);
+  save(); renderUpcomingSessions(patientId); render();
+  document.getElementById('sessions-add-fields').hidden = true;
+  toast('Sesión agregada');
+};
+document.getElementById('sessions-list').addEventListener('click', e => {
+  const patientId = state.editing;
+  if (!patientId) return;
+  const moveBtn = e.target.closest('[data-act="session-move"]');
+  const skipBtn = e.target.closest('[data-act="session-skip"]');
+  const undoBtn = e.target.closest('[data-act="session-undo"]');
+  if (moveBtn) {
+    openReschedule(patientId, moveBtn.dataset.date, moveBtn.dataset.time, { fromEditor: true, directOnce: true });
+  } else if (skipBtn) {
+    cancelOccurrence(db, patientId, skipBtn.dataset.date);
+    save(); renderUpcomingSessions(patientId); render();
+    toast('Marcada como no viene');
+  } else if (undoBtn) {
+    removeChange(db, undoBtn.dataset.changeId);
+    save(); renderUpcomingSessions(patientId); render();
+    toast('Deshecho');
+  }
+});
 document.getElementById('remove').onclick = () => {
   const p = findPatient(db, state.editing);
   if (!p) return;
@@ -1483,16 +1600,24 @@ const rescheduleForm = document.getElementById('reschedule-form');
 const rescheduleTimePicker = mountTimePicker(document.getElementById('reschedule-time-picker'), '16:00');
 let rescheduleCtx = null; // { patientId, date, time }
 
-function openReschedule(patientId, date, time) {
-  rescheduleCtx = { patientId, date, time };
+function openReschedule(patientId, date, time, opts = {}) {
+  rescheduleCtx = { patientId, date, time, fromEditor: !!opts.fromEditor };
   const p = findPatient(db, patientId);
   document.getElementById('reschedule-who').textContent =
     `${p ? p.name : ''} (${DAY_SHORT[weekdayOf(date)]} ${time || ''})`;
-  document.getElementById('reschedule-once-fields').hidden = true;
-  document.getElementById('reschedule-confirm').hidden = true;
+  const directOnce = !!opts.directOnce;
+  document.getElementById('reschedule-choices').hidden = directOnce;
+  document.getElementById('reschedule-once-fields').hidden = !directOnce;
+  document.getElementById('reschedule-confirm').hidden = !directOnce;
   rescheduleForm.elements.toDate.value = date;
   rescheduleTimePicker.value = time || '16:00';
   reschedule.showModal();
+}
+
+/** After a reschedule-sheet mutation, also refresh the editor's own "Próximas sesiones"
+ *  list when the sheet was opened from there (it stays open behind the sheet). */
+function refreshAfterRescheduleMutation() {
+  if (rescheduleCtx && rescheduleCtx.fromEditor) renderUpcomingSessions(rescheduleCtx.patientId);
 }
 
 reschedule.addEventListener('click', e => {
@@ -1504,7 +1629,7 @@ reschedule.addEventListener('click', e => {
   } else if (choice.dataset.choice === 'cancel') {
     if (!confirm('¿Cancelar esta sesión?')) return;
     cancelOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date);
-    save(); reschedule.close(); render(); toast('Sesión cancelada');
+    save(); reschedule.close(); refreshAfterRescheduleMutation(); render(); toast('Sesión cancelada');
   } else if (choice.dataset.choice === 'fixed') {
     const p = findPatient(db, rescheduleCtx.patientId);
     reschedule.close();
@@ -1519,7 +1644,7 @@ rescheduleForm.addEventListener('submit', e => {
   const toTime = rescheduleTimePicker.value;
   if (!ISO_DATE_RE.test(toDate) || !HHMM_RE.test(toTime)) { toast('Fecha u hora inválida'); return; }
   rescheduleOccurrence(db, rescheduleCtx.patientId, rescheduleCtx.date, toDate, toTime);
-  save(); reschedule.close(); render(); toast('Sesión reprogramada');
+  save(); reschedule.close(); refreshAfterRescheduleMutation(); render(); toast('Sesión reprogramada');
 });
 
 /* ---------- patient accounts sheet ---------- */

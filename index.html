@@ -91,13 +91,24 @@
     </div>
     <button type="button" class="btn danger remove" id="remove">Dar de baja</button>
   </form>
+  <button type="button" class="link-btn" id="sessions-toggle" hidden>Próximas sesiones</button>
+  <div class="from-field" id="sessions-section" hidden>
+    <div id="sessions-list"></div>
+    <button type="button" class="link-btn" id="sessions-add-toggle">Agregar sesión</button>
+    <div class="from-field" id="sessions-add-fields" hidden>
+      <label>Fecha <input type="date" id="extra-date"></label>
+      <div class="field-title">Hora</div>
+      <div id="sessions-add-picker"></div>
+      <button type="button" class="btn primary small" id="sessions-add-confirm">Agregar</button>
+    </div>
+  </div>
 </dialog>
 
 <dialog id="reschedule">
   <form method="dialog" id="reschedule-form">
     <h2>Reprogramar</h2>
     <p class="sub" id="reschedule-who"></p>
-    <div class="dialog-actions" style="flex-direction:column;align-items:stretch;gap:10px;margin-top:0">
+    <div class="dialog-actions" id="reschedule-choices" style="flex-direction:column;align-items:stretch;gap:10px;margin-top:0">
       <button type="button" class="btn wide" data-choice="once">Solo esta vez…</button>
       <button type="button" class="btn wide" style="color:var(--danger)" data-choice="cancel">Cancelar esta sesión</button>
       <button type="button" class="btn wide ghost" data-choice="fixed">Cambiar horario fijo</button>

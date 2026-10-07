@@ -445,6 +445,7 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 .slot-anchor[hidden] { display: none; }
 .slot-anchor select { min-height: 38px; padding: 6px 8px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.dialog-actions[hidden] { display: none; }
 .remove { display: block; margin: 14px auto 0; }
 .remove[hidden] { display: none; }
 .field-title { font-weight: 700; }
@@ -466,6 +467,7 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 }
 .sub.upcoming { color: var(--moved); }
 .diff { font-size: 12px; color: var(--muted); }
+.session-row.cancelled .name { text-decoration: line-through; color: var(--muted); }
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
