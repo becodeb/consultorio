@@ -130,7 +130,10 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T20 Time picker: 5-minute steps, wider hours.
 - [x] T21 Patient editor "Próximas sesiones": per-occurrence Mover / No viene, extra session,
       list + undo of existing one-off changes.
-- [ ] T22 Redeploy to Coolify + live checks (coordinator).
+- [x] T22 Redeploy to Coolify + live checks (coordinator): deploy `mghpsymm8ax5exb9clfjlidc`
+      of afad1c2 finished; `/`, `/api/health`, manifest 200; served app.js and styles.css
+      sha256 equal local. Parent re-ran e2e: 16/16; parent fixed the sessions section
+      padding and one-line rows (afad1c2).
 
 ## Acceptance criteria
 
