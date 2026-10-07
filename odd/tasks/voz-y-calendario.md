@@ -127,8 +127,8 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ### Phase 5 tasks
 
-- [ ] T20 Time picker: 5-minute steps, wider hours.
-- [ ] T21 Patient editor "Próximas sesiones": per-occurrence Mover / No viene, extra session,
+- [x] T20 Time picker: 5-minute steps, wider hours.
+- [x] T21 Patient editor "Próximas sesiones": per-occurrence Mover / No viene, extra session,
       list + undo of existing one-off changes.
 - [ ] T22 Redeploy to Coolify + live checks (coordinator).
 
@@ -679,6 +679,74 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   (genuinely separable, own file) and the Checks pass (e2e + screenshots) kept their own
   commits, so the phase is 3 commits instead of 4.
 
+- T20 (commit `9c455bc`): `TIME_PICKER_DEFAULT_MINUTES` now every 5 minutes (`00`...`55`,
+  12 options) instead of the 4 quarter-hours, and `TIME_PICKER_DEFAULT_HOURS` now `06`-`23`
+  instead of `07`-`22`. No other change needed — `mountTimePicker`'s existing
+  off-grid-value handling (extend the option list if the initial value isn't already on it)
+  already covered any edge case, and every call site (slot editor, reschedule sheet) shares
+  this one function, so the fix applies everywhere at once. Directly addresses the user's
+  complaint: 16:50 is now directly selectable, not just reachable by editing around it.
+
+- T21 (commit `ccf380b`): new "Próximas sesiones" section in the patient editor (existing
+  patients only — hidden for "Nuevo paciente"), collapsed behind a link like the T17
+  "Programar cambio" pattern. New pure helper `upcomingOccurrences(db, patientId, todayIso,
+  days=21)` lists the next 3 weeks: unlike `appointmentsOn` (which simply omits a cancelled
+  slot, since it's not meant to happen), this one **includes** a cancelled regular slot —
+  marked `kind:'cancelled'` — specifically so it can be shown struck-through and undone;
+  a moved slot is listed once, at its new date, with a "movida, antes ..." marker. Per-row
+  actions: a regular occurrence gets "Mover" (opens the existing `#reschedule` dialog,
+  extended with an `opts` param so it can jump straight to the date/time fields instead of
+  the 3-choice menu — not appropriate here since "No viene" already has its own dedicated,
+  no-confirm button right next to it) and "No viene" (`cancelOccurrence` directly, no
+  `confirm()` — explicitly requested since it's undoable); an already-changed occurrence
+  (moved/cancelled/extra) gets only "Deshacer" (new `removeChange(db, changeId)`, a plain
+  filter-by-id — works uniformly for all three change kinds since they all carry an `id`).
+  "Agregar sesión" is a separate always-visible control (date + the shared time picker,
+  so it's on the new 5-minute grid too) that calls `addExtraOccurrence`. All of it mutates
+  `db.changes` only — the fixed/dated schedule history (T16) is never touched, verified in
+  the Checks pass. Since `#reschedule` can now be opened while `#editor` is still open
+  behind it (HTML `<dialog>`s stack natively), `rescheduleCtx` gained a `fromEditor` flag so
+  the reschedule sheet's own handlers also call `renderUpcomingSessions()` after a mutation,
+  keeping the still-open editor's list in sync without closing it.
+  **CSS trap checked again** (per this project's recurring pattern): added
+  `.dialog-actions[hidden]{display:none}`, needed because I reused `.dialog-actions` as the
+  reschedule sheet's 3-choice-button wrapper and now toggle it via `hidden` when jumping
+  straight to the once-fields; confirmed necessary the same way as every prior occurrence.
+  The two new collapsible sections (`#sessions-section`, `#sessions-add-fields`) reused the
+  already-safe `.from-field` class (no competing `display` rule, already carries its own
+  `[hidden]` override from T17) rather than inventing a new one.
+
+  **Real ai-router result** (1 call, `AI_ROUTER_URL` default/production, same disposable
+  standalone-server script as phase 4, discarded after use): text "Martina no viene mañana,
+  viene el viernes a las 16:50" with `today=2026-10-07` (Wednesday) and Martina's regular
+  slot on Thursday (tomorrow) — the model returned a single
+  `reschedule_once{fromDate:"2026-10-08",toDate:"2026-10-09",toTime:"16:50"}` (the more
+  elegant one-action reading, vs. a separate cancel+add), with reply "Reprogramé a Martina
+  para el viernes 9 a las 16:50." Exact 16:50 confirms the new 5-minute grid reaches the
+  model path correctly too, not just the editor UI (1.4s).
+
+- Checks (commit `9cab2c1`): extended `scenarioTimePicker` to assert the picker's actual
+  hour/minute option lists (not just behavior) — `06`/`23` present, 12 minute options
+  stepping by 5 — and changed its save/reschedule assertions from `16:00` to `16:50` so the
+  5-minute grid is exercised end to end, not just declared. New `scenarioEditorSessions`
+  covers Mover (from the editor, confirms the reschedule sheet skips the 3-choice menu,
+  confirms the editor stays open behind it and its list refreshes, confirms Hoy/Semana show
+  the new time and no longer show the old slot), No viene (confirms no `confirm()` dialog
+  fires — listened for one via `page.once('dialog', ...)` and asserted it never did),
+  Deshacer on each (moved and cancelled), and Agregar sesión (confirms the extra shows in
+  Hoy and that `patients[].schedules` — the fixed history — has the same length before and
+  after). All 16 scenarios pass. `node --check app.js server.mjs tools/e2e.mjs` pass.
+
+  Screenshots: `pacientes-editor.png` refreshed (now explicitly closes the editor before the
+  next patient's dialog opens, since the "Próximas sesiones" work added a step in between —
+  no visual change otherwise, confirmed by inspection). New
+  `pacientes-editor-sesiones.png`: Martina's editor scrolled to "Próximas sesiones" with one
+  moved entry ("Vie 2/10 16:50 — movida, antes Jue 1/10 14:00") and one cancelled entry
+  ("Lun 5/10 14:00" struck through — "no viene"), both with their own "Deshacer", alongside
+  the untouched regular rows — confirms the section lays out cleanly at 390px with up to two
+  action buttons per row and no horizontal overflow. `semana.png`/`hoy.png` re-checked,
+  pixel-identical to phase 4 (no behavior changed for the common path).
+
 ## Deploy (T11, coordinator, 2026-09-27)
 
 - GitHub: `becodeb/consultorio` (public; history scanned for keys: clean).
@@ -878,5 +946,5 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ## Next step
 
-None — T16, T17, T18 and the phase-4 Checks pass are all done. T19 (redeploy to Coolify +
-live checks) is explicitly the coordinator's own follow-up.
+None — T20, T21 and the phase-5 Checks pass are all done. T22 (redeploy to Coolify + live
+checks) is explicitly the coordinator's own follow-up.
