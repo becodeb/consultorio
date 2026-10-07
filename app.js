@@ -48,16 +48,20 @@ const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 /* ---------- shared 24h time picker (two <select>s, never the locale's AM/PM input) --- */
 const TIME_PICKER_DEFAULT_HOURS = (() => {
   const out = [];
-  for (let h = 7; h <= 22; h++) out.push(String(h).padStart(2, '0'));
+  for (let h = 6; h <= 23; h++) out.push(String(h).padStart(2, '0'));
   return out;
 })();
-const TIME_PICKER_DEFAULT_MINUTES = ['00', '15', '30', '45'];
+const TIME_PICKER_DEFAULT_MINUTES = (() => {
+  const out = [];
+  for (let m = 0; m < 60; m += 5) out.push(String(m).padStart(2, '0'));
+  return out;
+})();
 
 /** Renders a compact "HH : MM" 24h picker (two native <select>s, so it stays keyboard
  *  and screen-reader friendly) into `container`, replacing its content. Hour options
- *  cover 07-22 by default, extended to include the initial value if it falls outside that
- *  (e.g. an existing very early/late session); minutes are the usual quarter-hours plus
- *  the initial value's minute if it's off-grid. Returns a live { value } accessor. */
+ *  cover 06-23 by default, extended to include the initial value if it falls outside that
+ *  (e.g. an existing very early/late session); minutes step every 5 (:00, :05, ... :55)
+ *  plus the initial value's minute if it's off-grid. Returns a live { value } accessor. */
 function mountTimePicker(container, initial) {
   const [ih, im] = (initial && HHMM_RE.test(initial) ? initial : '16:00').split(':');
   const hours = TIME_PICKER_DEFAULT_HOURS.includes(ih)
