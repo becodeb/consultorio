@@ -655,16 +655,22 @@ async function scenarioTimePicker(browser, origin) {
     await page.waitForSelector('dialog#editor[open]');
     assertEqual(await page.locator('dialog#editor input[type="time"]').count(), 0,
       'the patient editor must not contain a native (locale-dependent) time input');
+    const hourOptions = await page.locator('.slot-time .time-picker-hour option').evaluateAll(els => els.map(e => e.value));
+    assertTrue(hourOptions.includes('06') && hourOptions.includes('23'), 'hour range must cover 06-23');
+    const minOptions = await page.locator('.slot-time .time-picker-min option').evaluateAll(els => els.map(e => e.value));
+    assertTrue(minOptions.includes('05') && minOptions.includes('50') && minOptions.includes('55'),
+      'minute options must step every 5, including off-quarter-hour values like 05/50/55');
+    assertEqual(minOptions.length, 12, 'exactly 12 minute options (00, 05, ... 55)');
     await page.fill('#editor-form [name="patientName"]', 'Horario Test');
     await page.fill('#editor-form [name="price"]', '15000');
     await page.selectOption('.slot-time .time-picker-hour', '16');
-    await page.selectOption('.slot-time .time-picker-min', '00');
+    await page.selectOption('.slot-time .time-picker-min', '50');
     await page.click('#editor-form button[type="submit"]');
     await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
     let server = await readServerData(page);
     let p = server.data.patients.find(x => x.name === 'Horario Test');
     assertTrue(!!p, 'the new patient must have been saved');
-    assertEqual(p.schedules[0].slots[0].time, '16:00', 'the editor picker must save exactly "16:00"');
+    assertEqual(p.schedules[0].slots[0].time, '16:50', 'the editor picker must save exactly "16:50"');
 
     await goToView(page, 'hoy');
     const martinaRow = page.locator('li.row.appt', { hasText: 'Martina López' }).first();
@@ -675,14 +681,142 @@ async function scenarioTimePicker(browser, origin) {
     assertEqual(await page.locator('dialog#reschedule input[type="time"]').count(), 0,
       'the reschedule sheet must not contain a native time input');
     await page.selectOption('#reschedule-time-picker .time-picker-hour', '16');
-    await page.selectOption('#reschedule-time-picker .time-picker-min', '00');
+    await page.selectOption('#reschedule-time-picker .time-picker-min', '50');
     await page.click('#reschedule-confirm');
     await page.waitForTimeout(700); // save()'s own debounce before the PUT reaches the server
 
     server = await readServerData(page);
     const move = server.data.changes.find(c => c.kind === 'move' && c.patientId === 'p1');
     assertTrue(!!move, 'a move change must have been recorded');
-    assertEqual(move.toTime, '16:00', 'the reschedule picker must save exactly "16:00"');
+    assertEqual(move.toTime, '16:50', 'the reschedule picker must save exactly "16:50"');
+  } finally {
+    await context.close();
+  }
+}
+
+/* ---------- scenarios: phase 5 (5-minute picker, one-off changes from the editor) ---------- */
+
+async function scenarioEditorSessions(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('sessions');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+
+    const thursday = iso(addDays(ANCHOR, 3));  // 2026-10-01, Martina's regular Thursday
+    const friday = iso(addDays(ANCHOR, 4));    // 2026-10-02, moved target
+    const nextMonday = iso(addDays(ANCHOR, 7)); // 2026-10-05, Martina's regular Monday
+    const wednesday = iso(addDays(ANCHOR, 2));  // 2026-09-30, extra session day
+
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    assertTrue(await page.locator('#sessions-section').isHidden(), '"Próximas sesiones" must start collapsed');
+    await page.click('#sessions-toggle');
+    assertTrue(!(await page.locator('#sessions-section').isHidden()), 'toggling must reveal the section');
+    assertTrue(await page.locator(`#sessions-list [data-act="session-move"][data-date="${thursday}"]`).count() === 1,
+      'the regular Thursday occurrence must be listed with a Mover action');
+
+    // --- Mover: moves Thursday's regular session to Friday 16:50 (also exercises the new
+    // 5-minute picker step end to end, from the editor). ---
+    await page.locator(`[data-act="session-move"][data-date="${thursday}"]`).click();
+    await page.waitForSelector('#reschedule[open]');
+    assertTrue(await page.locator('#reschedule-choices').isHidden(), 'Mover from the editor must skip straight to the date/time fields');
+    assertTrue(!(await page.locator('#reschedule-once-fields').isHidden()), 'date/time fields must already be visible');
+    await page.fill('#reschedule-form [name="toDate"]', friday);
+    await page.selectOption('#reschedule-time-picker .time-picker-hour', '16');
+    await page.selectOption('#reschedule-time-picker .time-picker-min', '50');
+    await page.click('#reschedule-confirm');
+    await page.waitForSelector('#reschedule[open]', { state: 'hidden' });
+    await page.waitForTimeout(700);
+    assertTrue(await page.locator('dialog#editor[open]').count() === 1, 'the editor must stay open behind the reschedule sheet');
+    assertTrue(await page.locator(`#sessions-list [data-act="session-move"][data-date="${thursday}"]`).count() === 0,
+      'the moved-away Thursday slot must no longer be listed as a regular occurrence');
+    const movedRow = page.locator('#sessions-list .session-row', { hasText: '2/10' });
+    assertTrue(await movedRow.locator('.sub', { hasText: 'movida' }).count() === 1, 'the new slot must show the "movida, antes..." marker');
+
+    await page.click('#cancel');
+    await goToView(page, 'semana'); // the anchor week (Mon 28/9), which already spans both Oct 1 and Oct 2
+    assertTrue(await page.locator(`.week-block[aria-label="Martina López 16:50"]`).count() === 1,
+      'Semana must show the moved block at its new time');
+    assertTrue(await page.locator(`.week-block[aria-label*="Martina López 14:00"]`).count() === 1,
+      'Semana must still show Martina\'s unmoved Monday 14:00 block');
+
+    // --- Deshacer on the moved entry restores the regular Thursday occurrence. ---
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.click('#sessions-toggle');
+    await page.locator('#sessions-list [data-act="session-undo"]').first().click();
+    await page.waitForTimeout(700);
+    assertTrue(await page.locator(`#sessions-list [data-act="session-move"][data-date="${thursday}"]`).count() === 1,
+      'Deshacer must restore the regular Thursday occurrence in the list');
+    let server = await readServerData(page);
+    assertTrue(!server.data.changes.some(c => c.kind === 'move' && c.patientId === 'p1'), 'the move change must be gone from the server');
+
+    // --- No viene: cancels the regular next-Monday occurrence, no confirm dialog. ---
+    let dialogFired = false;
+    page.once('dialog', () => { dialogFired = true; });
+    await page.locator(`[data-act="session-skip"][data-date="${nextMonday}"]`).click();
+    await page.waitForTimeout(700);
+    assertTrue(!dialogFired, '"No viene" must not open a confirm dialog');
+    const cancelledRow = page.locator('#sessions-list .session-row.cancelled');
+    assertTrue(await cancelledRow.count() === 1, 'the cancelled occurrence must render struck-through');
+    server = await readServerData(page);
+    assertTrue(server.data.changes.some(c => c.kind === 'cancel' && c.patientId === 'p1' && c.date === nextMonday),
+      'a cancel change must be recorded for next Monday');
+
+    await page.click('#cancel');
+    await goToView(page, 'hoy');
+    for (let i = 0; i < 7; i++) await page.click('[data-act="day"][data-step="1"]'); // -> next Monday
+    await page.waitForTimeout(150);
+    assertEqual(await page.locator('li.row.appt', { hasText: 'Martina López' }).count(), 0,
+      'Hoy must not show the cancelled occurrence on next Monday');
+
+    // Undo the cancellation too, via the editor.
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.click('#sessions-toggle');
+    await page.locator('#sessions-list [data-act="session-undo"]').first().click();
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    assertTrue(!server.data.changes.some(c => c.kind === 'cancel' && c.patientId === 'p1'), 'the cancel change must be gone from the server');
+
+    // --- Agregar sesión: an extra compensation session, 11:35 (5-minute grid). ---
+    await page.click('#sessions-add-toggle');
+    await page.fill('#extra-date', wednesday);
+    await page.selectOption('#sessions-add-picker .time-picker-hour', '11');
+    await page.selectOption('#sessions-add-picker .time-picker-min', '35');
+    await page.click('#sessions-add-confirm');
+    await page.waitForTimeout(700);
+    assertTrue(await page.locator('#sessions-list .session-row', { hasText: 'sesión extra' }).count() === 1,
+      'the new extra session must be listed');
+    server = await readServerData(page);
+    assertTrue(server.data.changes.some(c => c.kind === 'extra' && c.patientId === 'p1' && c.date === wednesday && c.time === '11:35'),
+      'the extra change must be recorded with the exact 5-minute-grid time');
+    assertEqual(server.data.patients.find(x => x.id === 'p1').schedules.length, 1,
+      'adding a one-off extra session must never touch the fixed dated schedule history');
+
+    await page.click('#cancel');
+    await goToView(page, 'hoy');
+    await page.click('[data-act="today"]'); // reset Hoy's cursor back to the anchor date first
+    await page.waitForTimeout(150);
+    for (let i = 0; i < 2; i++) await page.click('[data-act="day"][data-step="1"]'); // -> Wednesday
+    await page.waitForTimeout(150);
+    assertTrue(await page.locator('li.row.appt', { hasText: 'Martina López' }).count() >= 1,
+      'Hoy must show the extra session on Wednesday');
+
+    // Undo the extra session.
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.click('#sessions-toggle');
+    await page.locator('#sessions-list [data-act="session-undo"]').first().click();
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    assertTrue(!server.data.changes.some(c => c.kind === 'extra' && c.patientId === 'p1'), 'the extra change must be gone from the server');
+    assertEqual(server.data.patients.find(x => x.id === 'p1').schedules.length, 1, 'fixed schedule history untouched throughout');
   } finally {
     await context.close();
   }
@@ -1011,6 +1145,28 @@ async function takeScreenshots(browser, origin) {
       await page.waitForSelector('dialog#editor[open]');
       await page.waitForTimeout(150);
       await page.screenshot({ path: path.join(SHOTS_DIR, 'pacientes-editor.png') });
+      await page.click('#cancel');
+
+      // pacientes-editor-sesiones.png: Martina's "Próximas sesiones", with one moved and
+      // one cancelled occurrence so both markers are visible in the shot.
+      await page.locator('button.row', { hasText: 'Martina López' }).click();
+      await page.waitForSelector('dialog#editor[open]');
+      await page.click('#sessions-toggle');
+      const movedFromDate = iso(addDays(ANCHOR, 3)); // her regular Thursday
+      await page.click(`[data-act="session-move"][data-date="${movedFromDate}"]`);
+      await page.waitForSelector('#reschedule[open]');
+      await page.fill('#reschedule-form [name="toDate"]', iso(addDays(ANCHOR, 4)));
+      await page.selectOption('#reschedule-time-picker .time-picker-hour', '16');
+      await page.selectOption('#reschedule-time-picker .time-picker-min', '50');
+      await page.click('#reschedule-confirm');
+      await page.waitForSelector('#reschedule[open]', { state: 'hidden' });
+      await page.waitForTimeout(700);
+      const skipDate = iso(addDays(ANCHOR, 7)); // her regular next Monday
+      await page.click(`[data-act="session-skip"][data-date="${skipDate}"]`);
+      await page.waitForTimeout(700);
+      await page.locator('#sessions-section').scrollIntoViewIfNeeded();
+      await page.waitForTimeout(100);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'pacientes-editor-sesiones.png') });
     } finally {
       await context.close();
     }
@@ -1079,6 +1235,9 @@ async function main() {
     await check('v2 seed data migrates to v3 with one dated entry per patient, values preserved', () => scenarioV2ToV3Migration(browser, origin));
     await check('scheduled schedule/price change: date-aware Hoy/Semana, frozen attendance price, "now" vs scheduled edits, upcoming list + delete, Precios/Horarios history', () => scenarioScheduledChanges(browser, origin));
     await check('voice schedule_change/price_change apply and sync', () => scenarioVoiceScheduledChanges(browser, origin));
+
+    // Phase 5: 5-minute picker, one-off changes from the patient editor
+    await check('editor "Próximas sesiones": Mover/No viene/Agregar sesión/Deshacer, Hoy+Semana reflect each, fixed schedule untouched', () => scenarioEditorSessions(browser, origin));
 
     console.log('\nTaking screenshots...');
     await takeScreenshots(browser, origin);
