@@ -119,6 +119,19 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
       of 1f07d43 finished; `/` and `/api/health` 200, `/api/me` 401, served app.js sha256
       equals local (51a11e3108ba). Parent re-ran e2e: 15/15.
 
+## Phase 5 scope (authorized by the user on 2026-10-08)
+
+- Time picker minutes every 5 minutes (e.g. 16:50), wider hour range.
+- From the patient editor, change a single occurrence: move it ("no viene mañana, viene
+  pasado mañana para compensar"), mark it as not coming in advance, or add an extra session.
+
+### Phase 5 tasks
+
+- [ ] T20 Time picker: 5-minute steps, wider hours.
+- [ ] T21 Patient editor "Próximas sesiones": per-occurrence Mover / No viene, extra session,
+      list + undo of existing one-off changes.
+- [ ] T22 Redeploy to Coolify + live checks (coordinator).
+
 ## Acceptance criteria
 
 - Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
