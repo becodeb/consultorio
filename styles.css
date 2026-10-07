@@ -416,6 +416,10 @@ dialog {
 }
 dialog::backdrop { background: rgba(15, 25, 40, .45); }
 dialog form { padding: 22px 20px 20px; }
+/* "Próximas sesiones" lives outside the editor form, so it needs the form's side padding. */
+#sessions-toggle { display: block; margin: 0 20px 8px; }
+#sessions-toggle[hidden] { display: none; }
+#sessions-section { padding: 0 20px 20px; }
 dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 .slots { display: grid; gap: 12px; margin: 6px 0 10px; }
 .slot {
@@ -480,3 +484,8 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* Patient editor "Próximas sesiones": keep date + time on one line, compact actions. */
+.session-row { gap: 8px; padding: 10px 12px; }
+.session-row .name { white-space: nowrap; }
+.session-row .btn.small { padding: 6px 8px; flex: none; }
