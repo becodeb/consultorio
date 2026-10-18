@@ -146,7 +146,7 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ### Phase 6 tasks
 
-- [ ] T23 Price history editor (modal), re-pricing of affected sessions with confirmation +
+- [x] T23 Price history editor (modal), re-pricing of affected sessions with confirmation +
       undo, entry points from the patient editor and the Cuentas patient sheet, voice support
       for past-dated price changes.
 - [ ] T24 Redeploy to Coolify + live checks (coordinator).
@@ -766,6 +766,118 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
   action buttons per row and no horizontal overflow. `semana.png`/`hoy.png` re-checked,
   pixel-identical to phase 4 (no behavior changed for the common path).
 
+- T23 (commits `6834747` + `375e864`): new "Precios de &lt;Nombre&gt;" dialog
+  (`<dialog id="price-history">`), its own `.sheet-inner` like the accounts sheet rather
+  than living inside the editor's `<form>`, since its mutations apply immediately and
+  independently of Guardar. Opens with a draft copy of `patient.prices` (each entry tagged
+  with a client-only `_key` so DOM handlers can always re-locate the right row regardless
+  of how dates/amounts change — this turned out to matter: see the two test bugs below,
+  the same class of staleness bit the screenshot script too). Each row: editable date +
+  amount inputs, a derived "1/6 → 14/10: $15.000" / "Desde 15/10: $18.000 (actual)" /
+  "...(programado)" label, and the diff vs. the previous segment as two separate spans
+  (`priceDiffParts`, reusing the existing diff math but split instead of one
+  "+$3.000 (+20%)" string, per the explicit instruction to avoid a middle-dot-style
+  separator). The current segment gets a highlighted border. "Agregar precio" defaults to
+  today + the currently-effective price; delete refuses (inline error, no `alert()`) when
+  it's the last remaining segment. New pure helper `normalizePriceEntries` (sort, one
+  entry per date — last write wins — drop a later entry that equals its predecessor's
+  amount) replaces ad hoc array surgery for this multi-row-edit case.
+
+  **Re-pricing**: new `affectedAttendanceForRepricing(db, patientId, newPrices)` (pure —
+  compares each `present` attendance record's frozen price against what `priceOn` would
+  now say) and `applyPriceHistory` (commits the new `prices[]` and rewrites exactly those
+  records). On Guardar, if anything is affected, a confirmation step replaces the editor
+  in place (same dialog, not a second one) showing the count, the signed total difference,
+  and a `repricingMonthlyBreakdown` (grouped by `YYYY-MM`, before→after) — "Volver" goes
+  back without touching `db`; "Actualizar" commits both the price history and the
+  attendance rewrite in one `JSON.parse(JSON.stringify(db))`-snapshotted mutation, then
+  shows a toast with a real "Deshacer" action (not just a message) that restores the whole
+  snapshot. When nothing is affected (a future-only edit, or a past edit that happens to
+  land on dates with no marked attendance), it saves directly — same immediate, no-ceremony
+  behavior as the existing "Programar cambio" flow, so the common case stays exactly as
+  practical as before. **Decision**: `toast()` gained an optional `{actionLabel, onAction}`
+  mode rather than building a second, parallel "undo slot" UI like the voice sheet already
+  has — one generic mechanism, reusable by anything that wants an undoable toast later.
+
+  Entry points: a "Historial" link next to "Precio por sesión" in the editor (hidden for
+  "Nuevo paciente", like "Dar de baja"/"Próximas sesiones"), and an "Editar" link added to
+  the Cuentas patient sheet's existing read-only "Precios" section. Both refresh after a
+  save via `refreshAfterPriceHistoryChange` (re-reads whichever of the editor/accounts
+  sheet is the one currently open behind the price-history dialog — they can stack, same
+  as the reschedule sheet over the editor since T21).
+
+  **Real bug found and fixed** (the toast action was unreachable, not just a test
+  artifact): `.toast` sat at `bottom:24px` with no `z-index`, inside the bottom nav bar's
+  footprint (`nav.tabs` is `position:fixed; bottom:0; z-index:15`) — harmless while the
+  toast was pure text (`pointer-events:none` except while showing), but the instant it
+  needed a clickable "Deshacer" button, the nav bar's own buttons intercepted the click
+  first. Fixed by moving the toast to `bottom:88px` (clear of the nav bar) and giving it
+  `z-index:20`. Found by the e2e scenario hanging on the Deshacer click, not by eyeballing
+  a screenshot — the overlap wasn't visually obvious since the toast still rendered on top.
+
+  **Voice**: `price_change`'s `from` was already accepted for any valid date at the
+  validation layer, but `applyVoiceAction` only ever called `setPriceFrom` — no re-pricing.
+  Rewired both `applyVoiceAction` and `describeVoiceAction` to build the same
+  `normalizePriceEntries`/`affectedAttendanceForRepricing`/`applyPriceHistory` pipeline as
+  the dialog (for a future `from` this is a no-op superset of the old behavior, since
+  `affected` is always empty — confirmed by the existing `scenarioVoiceScheduledChanges`
+  still passing unchanged). `describeVoiceAction`'s result line now appends
+  ", se actualizaron N sesiones" when anything was re-priced, matching the task's exact
+  example format; the model's own "reply" stays a plain confirmation since the count is
+  client-computed, documented as such in the prompt. The whole batch stays undoable via
+  the existing voice-sheet snapshot (no new voice-side undo needed — it already snapshots
+  `db` before applying any action in a turn).
+
+  **Real ai-router results** (2 calls, `AI_ROUTER_URL` default/production, same disposable
+  standalone-server script pattern as phases 4-5, discarded after use):
+
+  | # | Request | Result |
+  |---|---|---|
+  | 1 | "a Martina desde junio le cobraba quince mil" | `price_change` p1 from `2026-06-01`, amount 15000 — reply: "Actualicé el precio de Martina L. a $15.000 desde el 1 de junio." (3.2s) |
+  | 2 | "corregí el precio de Tomás: desde agosto eran dieciocho mil" | `price_change` p4 from `2026-08-01`, amount 18000 — reply: "Listo, corregí el precio de Tomás a $18.000 a partir de agosto." (0.8s) |
+
+  Both correct on the first try. (No dedicated mocked e2e scenario for voice-triggered
+  re-pricing specifically — the task called 1-2 real calls sufficient for this sub-feature,
+  and the re-pricing pipeline itself is already exercised end-to-end by the dialog's e2e
+  scenario; voice only wires the same pure functions.)
+
+- Checks (commit `72d780a`): new `scenarioPriceHistoryEditor`, all previous 16 kept green
+  (**17/17 total**). `node --check app.js server.mjs tools/e2e.mjs` pass. Covers: both
+  entry points; deleting the last segment is refused inline; an empty amount is rejected
+  inline (no `alert()`, dialog stays open); editing Martina's single $15.000 segment (date
+  moved earlier, amount to $17.000) — since it's her only segment, this affects all 6 of
+  her September present sessions — confirmation shows "6 sesiones ya marcadas (+$12.000)"
+  and the September "$90.000 → $102.000" breakdown; "Volver" applies nothing (checked
+  against server data); "Actualizar" re-prices every one of those 6 records and Cuentas'
+  list total updates to match; Deshacer restores both the price history and every record's
+  original price; a future-only addition saves with no confirmation step and never touches
+  attendance (and shows the plain toast with no Deshacer action — checked explicitly);
+  deleting that segment persists; the quick "now" price edit (existing flow) still never
+  re-prices anything.
+
+  **Two real test bugs found and fixed while writing this** (both in the test, not the
+  app — noted so the next session doesn't rediscover them from scratch): (1) reading
+  server data immediately after `seedServer`'s reload got the pre-migration v2 shape
+  (`.prices` undefined) — same gotcha already documented in phase 4's
+  `scenarioV2ToV3Migration`, fixed the same way (force `window.save()` once up front).
+  (2) Two spots tried to navigate the main view away while a dialog opened *from inside*
+  another still-open dialog (price-history opened from the editor, or from the accounts
+  sheet) — the outer dialog, never explicitly closed, intercepted the nav-tab click. Same
+  stacking pattern as T21's reschedule-sheet-from-editor; fixed by closing the outer dialog
+  (`#cancel` / `#accounts-close`) before navigating away, and by re-deriving a row locator
+  from its *stable* `data-key` rather than a `value="..."` filter when a later step edits
+  that exact field (the filter goes stale the instant the matching attribute changes —
+  this one bit the screenshot-generation code specifically, not the scenario itself).
+
+  Screenshots: `precios-dialog.png` (Martina with 3 segments — past $13.000, current
+  $15.000 highlighted, programado $18.000 — each diff shown as two spans) and
+  `precios-confirm.png` (editing the current segment to $17.000 → "Esto actualiza 6
+  sesiones ya marcadas (+$12.000)" + the September $90.000 → $102.000 row) both inspected
+  by hand, no layout issues. `pacientes-editor.png` refreshed and caught a real one: the
+  new "Historial" link rendered flush against "Programar cambio" with no gap (both
+  `.link-btn`, which has no `display` override and so no implicit spacing) — fixed with
+  `.link-btn + .link-btn { margin-left: 16px }`.
+
 ## Deploy (T11, coordinator, 2026-09-27)
 
 - GitHub: `becodeb/consultorio` (public; history scanned for keys: clean).
@@ -965,5 +1077,5 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 
 ## Next step
 
-None — T20, T21 and the phase-5 Checks pass are all done. T22 (redeploy to Coolify + live
-checks) is explicitly the coordinator's own follow-up.
+None — T23 and the phase-6 Checks pass are done. T24 (redeploy to Coolify + live checks)
+is explicitly the coordinator's own follow-up.
