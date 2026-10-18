@@ -149,7 +149,9 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
 - [x] T23 Price history editor (modal), re-pricing of affected sessions with confirmation +
       undo, entry points from the patient editor and the Cuentas patient sheet, voice support
       for past-dated price changes.
-- [ ] T24 Redeploy to Coolify + live checks (coordinator).
+- [x] T24 Redeploy to Coolify + live checks (coordinator): deploy `lmnojzudz2qqrbd4vyeok2y9`
+      of 2c1d6e7 finished; `/`, `/api/health`, manifest 200, `/api/me` 401; served app.js
+      and styles.css sha256 equal local. Parent re-ran e2e: 17/17.
 
 ## Acceptance criteria
 
