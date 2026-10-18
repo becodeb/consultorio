@@ -72,6 +72,7 @@
       <input name="price" type="number" inputmode="numeric" min="0" step="1" required>
     </label>
     <button type="button" class="link-btn" id="price-change-toggle">Programar cambio</button>
+    <button type="button" class="link-btn" id="price-history-open" hidden>Historial</button>
     <label class="from-field" id="price-from-field" hidden>A partir de
       <input type="date" name="priceFrom">
     </label>
@@ -100,6 +101,28 @@
       <div class="field-title">Hora</div>
       <div id="sessions-add-picker"></div>
       <button type="button" class="btn primary small" id="sessions-add-confirm">Agregar</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="price-history">
+  <div class="sheet-inner">
+    <h2 id="price-history-title">Precios</h2>
+    <div id="price-history-error" class="field-error" hidden></div>
+    <div id="price-history-timeline"></div>
+    <button type="button" class="btn" id="price-history-add">Agregar precio</button>
+    <div id="price-history-confirm" hidden>
+      <div class="field-title">Confirmar actualización</div>
+      <p id="price-history-confirm-summary" class="sub"></p>
+      <div id="price-history-confirm-months"></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn ghost" id="price-history-confirm-back">Volver</button>
+        <button type="button" class="btn primary" id="price-history-confirm-apply">Actualizar</button>
+      </div>
+    </div>
+    <div class="dialog-actions" id="price-history-actions">
+      <button type="button" class="btn ghost" id="price-history-close">Cerrar</button>
+      <button type="button" class="btn primary" id="price-history-save">Guardar</button>
     </div>
   </div>
 </dialog>

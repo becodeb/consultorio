@@ -220,6 +220,58 @@ function deleteDatedEntry(entries, from, todayIso) {
   return entries.filter(e => e.from !== from);
 }
 
+/** Sorts a prospective `prices[]` (or `schedules[]`-shaped) list by `from`, keeps one entry
+ *  per date (last write wins for a repeated date), and drops a later entry whose `amount`
+ *  equals its immediate predecessor's — no redundant history noise. Used by the full price
+ *  history editor, where several rows can be added/edited/removed before one save, and by
+ *  voice's price_change (appending one entry to the patient's current history). */
+function normalizePriceEntries(entries) {
+  const byFrom = new Map();
+  for (const e of entries) byFrom.set(e.from, { from: e.from, amount: Math.round(Number(e.amount)) });
+  const sorted = [...byFrom.values()].sort((a, b) => a.from.localeCompare(b.from));
+  const out = [];
+  for (const e of sorted) {
+    if (out.length && out[out.length - 1].amount === e.amount) continue;
+    out.push(e);
+  }
+  return out;
+}
+
+/** Which of this patient's already-marked `present` attendance records would charge a
+ *  different price under `newPrices` (a prospective full `prices[]` replacement) — the
+ *  re-pricing impact of editing past price history. Pure: reads `db`, mutates nothing. */
+function affectedAttendanceForRepricing(db, patientId, newPrices) {
+  const candidate = { prices: newPrices };
+  return db.attendance
+    .filter(a => a.patientId === patientId && a.status === 'present')
+    .map(a => ({ record: a, oldPrice: a.price, newPrice: priceOn(candidate, a.date) }))
+    .filter(x => x.newPrice !== x.oldPrice);
+}
+
+/** Commits a full price-history replacement and rewrites the given already-affected
+ *  attendance records' frozen price to match. `affected` must come from
+ *  `affectedAttendanceForRepricing` against the same `newPrices`. Payments are untouched. */
+function applyPriceHistory(db, patientId, newPrices, affected) {
+  const p = findPatient(db, patientId);
+  if (!p) return;
+  p.prices = newPrices;
+  for (const { record, newPrice } of affected) record.price = newPrice;
+}
+
+/** Groups re-pricing-affected records by "YYYY-MM" with before/after totals, for the price
+ *  history editor's confirmation step. */
+function repricingMonthlyBreakdown(affected) {
+  const byMonth = new Map();
+  for (const { record, oldPrice, newPrice } of affected) {
+    const month = record.date.slice(0, 7);
+    if (!byMonth.has(month)) byMonth.set(month, { month, before: 0, after: 0 });
+    const m = byMonth.get(month);
+    m.before += oldPrice;
+    m.after += newPrice;
+  }
+  return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
+}
+
 function findPatient(db, id) { return db.patients.find(p => p.id === id); }
 
 /** Positive = the patient owes this amount; negative = they have a credit ("a favor"). */
@@ -506,8 +558,15 @@ function describeVoiceAction(db, a) {
       return `${name}: datos actualizados`;
     case 'schedule_change':
       return `${name}: desde el ${describeDateShort(a.from)} viene ${slotsText(a.schedule)}`;
-    case 'price_change':
-      return `${name}: ${moneyFmt(Number(a.amount))} desde el ${describeDateShort(a.from)}`;
+    case 'price_change': {
+      const base = `${name}: ${moneyFmt(Number(a.amount))} desde el ${describeDateShort(a.from)}`;
+      if (!p) return base;
+      const normalized = normalizePriceEntries([...p.prices, { from: a.from, amount: Number(a.amount) }]);
+      const affected = affectedAttendanceForRepricing(db, a.patientId, normalized);
+      return affected.length
+        ? `${base}, se actualizaron ${affected.length} ${affected.length === 1 ? 'sesión' : 'sesiones'}`
+        : base;
+    }
     case 'deactivate_patient':
       return `${name}: dado de baja`;
     case 'record_payment': {
@@ -556,9 +615,13 @@ function applyVoiceAction(db, a) {
     case 'schedule_change':
       setScheduleFrom(findPatient(db, a.patientId), a.from, a.schedule);
       return;
-    case 'price_change':
-      setPriceFrom(findPatient(db, a.patientId), a.from, Number(a.amount));
+    case 'price_change': {
+      const p = findPatient(db, a.patientId);
+      const normalized = normalizePriceEntries([...p.prices, { from: a.from, amount: Number(a.amount) }]);
+      const affected = affectedAttendanceForRepricing(db, a.patientId, normalized);
+      applyPriceHistory(db, a.patientId, normalized, affected);
       return;
+    }
     case 'deactivate_patient':
       findPatient(db, a.patientId).active = false;
       return;
@@ -826,10 +889,21 @@ async function boot() {
 }
 
 let toastTimer;
-function toast(msg) {
+/** Plain toast by default. With `opts.actionLabel`/`opts.onAction`, shows an inline action
+ *  button (e.g. "Deshacer") and stays up longer so there's time to tap it. */
+function toast(msg, opts = {}) {
   const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+  if (opts.actionLabel && opts.onAction) {
+    t.innerHTML = `<span>${esc(msg)}</span><button type="button" class="toast-action">${esc(opts.actionLabel)}</button>`;
+    t.querySelector('.toast-action').onclick = () => {
+      clearTimeout(toastTimer); t.classList.remove('show'); opts.onAction();
+    };
+  } else {
+    t.textContent = msg;
+  }
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), opts.actionLabel ? 6000 : 2200);
 }
 
 function slotsText(slots) {
@@ -1402,6 +1476,7 @@ function openEditor(p) {
   renderPriceUpcoming(p);
   renderScheduleUpcoming(p);
   document.getElementById('remove').hidden = !p;
+  document.getElementById('price-history-open').hidden = !p;
   document.getElementById('sessions-toggle').hidden = !p;
   document.getElementById('sessions-section').hidden = true;
   document.getElementById('sessions-add-fields').hidden = true;
@@ -1689,6 +1764,16 @@ function priceDiffText(curr, prev) {
   return `${sign}${moneyFmt(diff)} (${sign}${pct}%)`;
 }
 
+/** Same diff as `priceDiffText`, split as separate amount/percent strings (e.g. for two
+ *  spans) rather than one "+$3.000 (+20%)" string — avoids a middle-dot-style separator. */
+function priceDiffParts(curr, prev) {
+  const diff = curr - prev;
+  if (diff === 0) return null;
+  const pct = prev ? Math.round((diff / prev) * 100) : 0;
+  const sign = diff > 0 ? '+' : '';
+  return { amt: `${sign}${moneyFmt(diff)}`, pct: `${sign}${pct}%` };
+}
+
 /** Price history, newest first: date, amount, diff vs the previous entry; a future
  *  (not-yet-effective) entry is marked "Programado". */
 function renderPriceHistory(patientId) {
@@ -1707,7 +1792,9 @@ function renderPriceHistory(patientId) {
       <span class="amount">${moneyFmt(e.amount)}</span>
     </li>`;
   });
-  let html = '<div class="field-title">Precios</div>';
+  let html = `<div class="field-title" style="display:flex;justify-content:space-between;align-items:center">Precios
+    <button type="button" class="link-btn" style="margin:0" data-act="edit-price-history" data-id="${patientId}">Editar</button>
+  </div>`;
   html += rowsAsc.length
     ? `<ul class="list small-list">${rowsAsc.slice().reverse().join('')}</ul>`
     : '<div class="empty small">Sin historial</div>';
@@ -1800,6 +1887,228 @@ document.getElementById('accounts-history').addEventListener('click', e => {
   render();
   toast('Pago eliminado');
 });
+
+document.getElementById('accounts-price-history').addEventListener('click', e => {
+  const b = e.target.closest('[data-act="edit-price-history"]');
+  if (!b) return;
+  openPriceHistory(b.dataset.id);
+});
+
+/* ---------- price history editor (full timeline, re-pricing) ---------- */
+const priceHistoryDialog = document.getElementById('price-history');
+let priceHistoryCtx = null; // { patientId, draft: [{from,amount,_key}], pendingNormalized, pendingAffected }
+let priceHistoryUndoSnapshot = null;
+
+function priceHistoryShowStep(step) {
+  document.getElementById('price-history-timeline').hidden = step !== 'edit';
+  document.getElementById('price-history-add').hidden = step !== 'edit';
+  document.getElementById('price-history-actions').hidden = step !== 'edit';
+  document.getElementById('price-history-confirm').hidden = step !== 'confirm';
+}
+
+function priceHistoryShowError(msg) {
+  const el = document.getElementById('price-history-error');
+  el.textContent = msg;
+  el.hidden = false;
+}
+function priceHistoryHideError() {
+  document.getElementById('price-history-error').hidden = true;
+}
+
+function openPriceHistory(patientId) {
+  const p = findPatient(db, patientId);
+  if (!p) return;
+  priceHistoryCtx = {
+    patientId,
+    draft: p.prices.map(e => ({ from: e.from, amount: e.amount, _key: uid() })),
+    pendingNormalized: null, pendingAffected: null,
+  };
+  document.getElementById('price-history-title').textContent = `Precios de ${p.name}`;
+  priceHistoryHideError();
+  priceHistoryShowStep('edit');
+  renderPriceHistoryTimeline();
+  priceHistoryDialog.showModal();
+}
+
+function priceHistoryRowHtml(e, meta) {
+  return `<div class="price-edit-row ${meta.isCurrent ? 'current' : ''}" data-key="${e._key}">
+    <div class="price-edit-fields">
+      <input type="date" class="ph-date" value="${e.from}" aria-label="Desde">
+      <input type="number" class="ph-amount" inputmode="numeric" min="1" step="1" value="${e.amount}" aria-label="Precio">
+      <button type="button" class="x" data-act="ph-delete" aria-label="Quitar este precio">×</button>
+    </div>
+    <div class="sub">
+      <span>${meta.rangeLabel}</span>
+      ${meta.diffAmt ? `<span class="diff-amt">${meta.diffAmt}</span><span class="diff-pct">${meta.diffPct}</span>` : ''}
+    </div>
+  </div>`;
+}
+
+function renderPriceHistoryTimeline() {
+  const ctx = priceHistoryCtx;
+  const el = document.getElementById('price-history-timeline');
+  if (!ctx) { el.innerHTML = ''; return; }
+  const todayIso = iso(new Date());
+  const asc = [...ctx.draft].sort((a, b) => a.from.localeCompare(b.from));
+  let currentIdx = -1;
+  for (let i = 0; i < asc.length; i++) if (asc[i].from <= todayIso) currentIdx = i;
+
+  const rows = asc.map((e, i) => {
+    const next = asc[i + 1];
+    const prev = asc[i - 1];
+    const isFuture = e.from > todayIso;
+    let rangeLabel;
+    if (next) {
+      const endIso = iso(addDays(dateFromIso(next.from), -1));
+      rangeLabel = `${describeDateShort(e.from)} → ${describeDateShort(endIso)}: ${moneyFmt(e.amount)}`;
+    } else {
+      rangeLabel = `Desde ${describeDateShort(e.from)}: ${moneyFmt(e.amount)}${isFuture ? ' (programado)' : ' (actual)'}`;
+    }
+    const diff = prev ? priceDiffParts(e.amount, prev.amount) : null;
+    return priceHistoryRowHtml(e, {
+      isCurrent: i === currentIdx,
+      rangeLabel,
+      diffAmt: diff ? diff.amt : '',
+      diffPct: diff ? diff.pct : '',
+    });
+  }).reverse(); // newest first
+
+  el.innerHTML = rows.join('') || '<div class="empty small">Sin precios</div>';
+}
+
+document.getElementById('price-history-open').onclick = () => {
+  if (state.editing) openPriceHistory(state.editing);
+};
+
+document.getElementById('price-history-add').onclick = () => {
+  const ctx = priceHistoryCtx;
+  if (!ctx) return;
+  const todayIso = iso(new Date());
+  const current = priceOn({ prices: ctx.draft }, todayIso);
+  ctx.draft.push({ from: todayIso, amount: current || 0, _key: uid() });
+  priceHistoryHideError();
+  renderPriceHistoryTimeline();
+};
+
+document.getElementById('price-history-timeline').addEventListener('click', e => {
+  const btn = e.target.closest('[data-act="ph-delete"]');
+  if (!btn || !priceHistoryCtx) return;
+  const ctx = priceHistoryCtx;
+  if (ctx.draft.length <= 1) { priceHistoryShowError('Tiene que quedar al menos un precio.'); return; }
+  const key = btn.closest('[data-key]').dataset.key;
+  ctx.draft = ctx.draft.filter(x => x._key !== key);
+  priceHistoryHideError();
+  renderPriceHistoryTimeline();
+});
+
+document.getElementById('price-history-timeline').addEventListener('change', e => {
+  const row = e.target.closest('[data-key]');
+  if (!row || !priceHistoryCtx) return;
+  const entry = priceHistoryCtx.draft.find(x => x._key === row.dataset.key);
+  if (!entry) return;
+  if (e.target.classList.contains('ph-date')) entry.from = e.target.value;
+  else if (e.target.classList.contains('ph-amount')) entry.amount = Number(e.target.value);
+  priceHistoryHideError();
+  renderPriceHistoryTimeline();
+});
+
+function validatePriceDraft(draft) {
+  if (!draft.length) return 'Tiene que haber al menos un precio.';
+  for (const e of draft) {
+    if (!ISO_DATE_RE.test(e.from)) return 'Hay una fecha inválida.';
+    if (!(Number(e.amount) > 0) || !Number.isFinite(Number(e.amount))) return 'Hay un precio inválido.';
+  }
+  return null;
+}
+
+function priceHistoryMonthLabel(month) {
+  const [y, m] = month.split('-');
+  return `${MONTHS[Number(m) - 1]} ${y}`;
+}
+
+function showPriceHistoryConfirm(normalized, affected) {
+  const ctx = priceHistoryCtx;
+  ctx.pendingNormalized = normalized;
+  ctx.pendingAffected = affected;
+  const totalDiff = affected.reduce((t, x) => t + (x.newPrice - x.oldPrice), 0);
+  const sign = totalDiff > 0 ? '+' : totalDiff < 0 ? '−' : '';
+  document.getElementById('price-history-confirm-summary').textContent =
+    `Esto actualiza ${affected.length} ${affected.length === 1 ? 'sesión ya marcada' : 'sesiones ya marcadas'} (${sign}${moneyFmt(Math.abs(totalDiff))}).`;
+  const months = repricingMonthlyBreakdown(affected);
+  document.getElementById('price-history-confirm-months').innerHTML = months.length
+    ? `<ul class="list small-list">${months.map(m => `<li class="row">
+        <span class="who"><span class="name" style="text-transform:capitalize">${priceHistoryMonthLabel(m.month)}</span></span>
+        <span class="amount">${moneyFmt(m.before)} → ${moneyFmt(m.after)}</span>
+      </li>`).join('')}</ul>`
+    : '';
+  priceHistoryShowStep('confirm');
+}
+
+document.getElementById('price-history-save').onclick = () => {
+  const ctx = priceHistoryCtx;
+  if (!ctx) return;
+  const err = validatePriceDraft(ctx.draft);
+  if (err) { priceHistoryShowError(err); return; }
+  priceHistoryHideError();
+  const normalized = normalizePriceEntries(ctx.draft);
+  const affected = affectedAttendanceForRepricing(db, ctx.patientId, normalized);
+  if (affected.length) showPriceHistoryConfirm(normalized, affected);
+  else commitPriceHistory(ctx.patientId, normalized, []);
+};
+
+document.getElementById('price-history-confirm-back').onclick = () => {
+  priceHistoryShowStep('edit');
+};
+document.getElementById('price-history-confirm-apply').onclick = () => {
+  const ctx = priceHistoryCtx;
+  if (!ctx) return;
+  commitPriceHistory(ctx.patientId, ctx.pendingNormalized, ctx.pendingAffected);
+};
+document.getElementById('price-history-close').onclick = () => priceHistoryDialog.close();
+
+/** Refreshes whichever open view(s) show this patient's price/balance after a price
+ *  history save — the editor (if it's the one open) and the Cuentas patient sheet. */
+function refreshAfterPriceHistoryChange(patientId) {
+  const p = findPatient(db, patientId);
+  if (!p) return;
+  if (state.editing === patientId) {
+    form.elements.price.value = priceOn(p, iso(new Date()));
+    renderPriceUpcoming(p);
+  }
+  if (accountsPatientId === patientId) {
+    const balance = balanceOf(db, patientId);
+    const chip = balanceChip(balance);
+    const balEl = document.getElementById('accounts-balance');
+    balEl.textContent = chip.text;
+    balEl.className = 'accounts-balance ' + chip.cls;
+    renderAccountsHistory(patientId);
+    renderPriceHistory(patientId);
+    renderScheduleHistory(patientId);
+  }
+}
+
+function commitPriceHistory(patientId, normalized, affected) {
+  const snapshot = JSON.parse(JSON.stringify(db));
+  applyPriceHistory(db, patientId, normalized, affected);
+  save();
+  priceHistoryDialog.close();
+  refreshAfterPriceHistoryChange(patientId);
+  render();
+  if (affected.length) {
+    priceHistoryUndoSnapshot = snapshot;
+    toast(`${affected.length} ${affected.length === 1 ? 'sesión actualizada' : 'sesiones actualizadas'}`, {
+      actionLabel: 'Deshacer',
+      onAction: () => {
+        if (!priceHistoryUndoSnapshot) return;
+        db = priceHistoryUndoSnapshot; priceHistoryUndoSnapshot = null;
+        save(); refreshAfterPriceHistoryChange(patientId); render();
+        toast('Deshecho');
+      },
+    });
+  } else {
+    toast('Precios actualizados');
+  }
+}
 
 /* ---------- voice sheet ---------- */
 const voiceSheet = document.getElementById('voice-sheet');

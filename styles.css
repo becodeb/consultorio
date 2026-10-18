@@ -458,6 +458,7 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
   border: 0; background: none; color: var(--moved); font-weight: 700; font-size: 13px;
   padding: 4px 0; margin-bottom: 10px; text-align: left; cursor: pointer;
 }
+.link-btn + .link-btn { margin-left: 16px; }
 .from-field { margin-bottom: 10px; }
 .from-field[hidden] { display: none; }
 .upcoming-list:empty { display: none; }
@@ -473,13 +474,34 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 .diff { font-size: 12px; color: var(--muted); }
 .session-row.cancelled .name { text-decoration: line-through; color: var(--muted); }
 
+.field-error {
+  background: var(--novino-bg); color: var(--novino-fg); border-radius: 10px;
+  padding: 8px 12px; font-size: 14px; margin-bottom: 14px;
+}
+.price-edit-row {
+  display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 12px;
+  margin-bottom: 8px;
+}
+.price-edit-row.current { border-color: var(--pencil); background: color-mix(in srgb, var(--pencil) 10%, var(--surface)); }
+.price-edit-fields { display: grid; grid-template-columns: minmax(132px, 1.3fr) minmax(0, 1fr) 30px; gap: 6px; }
+.price-edit-fields input { min-height: 44px; min-width: 0; padding: 8px 6px; font-size: 15px; }
+.price-edit-fields .x { border: 0; background: none; font-size: 20px; color: var(--muted); padding: 0; }
+.price-edit-row .sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0; }
+.diff-amt, .diff-pct { font-size: 12px; color: var(--muted); }
+
 .toast {
-  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: 88px; transform: translateX(-50%);
   background: var(--ink); color: var(--paper);
   padding: 10px 18px; border-radius: var(--radius-btn);
+  display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px);
   opacity: 0; pointer-events: none; transition: opacity .2s;
+  z-index: 20;
 }
-.toast.show { opacity: 1; }
+.toast.show { opacity: 1; pointer-events: auto; }
+.toast-action {
+  border: 0; background: none; color: var(--pencil); font-weight: 700;
+  padding: 0; cursor: pointer; white-space: nowrap; flex: none;
+}
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
