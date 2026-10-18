@@ -1038,6 +1038,161 @@ async function scenarioVoiceScheduledChanges(browser, origin) {
   }
 }
 
+/* ---------- scenarios: phase 6 (full price history editor) ---------- */
+
+async function scenarioPriceHistoryEditor(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('pricehistory');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+    // seedServer's reload migrates v2 -> v3 client-side only; force the push so
+    // readServerData() sees prices[] from the very first check (same gotcha as phase 4's
+    // scenarioV2ToV3Migration).
+    await page.evaluate(() => window.save());
+    await page.waitForTimeout(700);
+
+    // Martina (p1) has 6 present sessions in September 2026, all frozen at $15.000 (her
+    // only price entry, dated at `since`). Editing that single entry re-prices all 6.
+    const earlierFrom = iso(addDays(ANCHOR, -200)); // well before `since` (-120 days)
+
+    // --- Entry point 1: the editor's "Historial" link. ---
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    assertTrue(!(await page.locator('#price-history-open').isHidden()), '"Historial" link must be visible for an existing patient');
+    await page.click('#price-history-open');
+    await page.waitForSelector('dialog#price-history[open]');
+
+    assertEqual(await page.locator('.price-edit-row').count(), 1, 'Martina starts with exactly one price segment');
+    assertTrue((await page.locator('.price-edit-row').first().innerText()).includes('(actual)'), 'her only segment must be marked as current');
+
+    // --- Validation: can't delete the last remaining segment. ---
+    await page.click('.price-edit-row .x');
+    assertTrue(!(await page.locator('#price-history-error').isHidden()), 'deleting the last segment must show an inline error');
+    assertEqual(await page.locator('.price-edit-row').count(), 1, 'the last segment must still be there');
+
+    // --- Edit it: move the date earlier ("desde hace tiempo") and raise the price. ---
+    await page.fill('.price-edit-row .ph-date', earlierFrom);
+    await page.fill('.price-edit-row .ph-amount', '17000');
+    await page.locator('.price-edit-row .ph-amount').blur();
+    await page.waitForTimeout(100);
+    assertEqual(await page.locator('.price-edit-row .ph-amount').inputValue(), '17000', 'the amount input must hold the edited value');
+
+    await page.click('#price-history-save');
+    await page.waitForSelector('#price-history-confirm:not([hidden])');
+    const summary = await page.locator('#price-history-confirm-summary').innerText();
+    assertTrue(summary.includes('6'), `confirmation must state 6 affected sessions (got: "${summary}")`);
+    assertTrue(summary.includes('12.000'), `confirmation must state the total difference +$12.000 (got: "${summary}")`);
+    const monthsText = await page.locator('#price-history-confirm-months').innerText();
+    assertTrue(monthsText.includes('90.000') && monthsText.includes('102.000'),
+      `confirmation must show the September before->after totals (got: "${monthsText}")`);
+
+    // "Volver" goes back to editing without applying anything.
+    await page.click('#price-history-confirm-back');
+    assertTrue(!(await page.locator('#price-history-timeline').isHidden()), 'Volver must return to the editable timeline');
+    let server = await readServerData(page);
+    let martina = server.data.patients.find(p => p.id === 'p1');
+    assertEqual(martina.prices[0].amount, 15000, 'nothing must be applied yet after Volver');
+
+    // Now actually confirm.
+    await page.click('#price-history-save');
+    await page.waitForSelector('#price-history-confirm:not([hidden])');
+    await page.click('#price-history-confirm-apply');
+    await page.waitForSelector('#price-history[open]', { state: 'hidden' });
+    await page.waitForTimeout(700);
+
+    server = await readServerData(page);
+    martina = server.data.patients.find(p => p.id === 'p1');
+    assertEqual(martina.prices.length, 1, 'still exactly one segment after the edit');
+    assertEqual(martina.prices[0].amount, 17000, 'the segment amount must be updated');
+    assertEqual(martina.prices[0].from, earlierFrom, 'the segment date must be updated');
+    const martinaAttendance = server.data.attendance.filter(a => a.patientId === 'p1' && a.status === 'present');
+    assertEqual(martinaAttendance.length, 6, 'sanity: Martina has 6 present sessions');
+    assertTrue(martinaAttendance.every(a => a.price === 17000), 'every one of her present sessions must be re-priced to $17.000');
+
+    // Cuentas reflects it: her row's monthly total and balance chip.
+    await page.click('#cancel'); // close the editor, still open behind the price-history dialog
+    await goToView(page, 'cuentas');
+    const martinaCuentasButton = page.locator('button[data-act="patient-accounts"]', { hasText: 'Martina López' });
+    assertTrue((await martinaCuentasButton.innerText()).includes('102.000'), 'Cuentas list must show the re-priced monthly total');
+
+    // --- Deshacer restores both attendance and price history. ---
+    await page.click('.toast-action');
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    martina = server.data.patients.find(p => p.id === 'p1');
+    assertEqual(martina.prices.length, 1, 'Deshacer must restore the original single segment');
+    assertEqual(martina.prices[0].amount, 15000, 'Deshacer must restore the original amount');
+    const restoredAttendance = server.data.attendance.filter(a => a.patientId === 'p1' && a.status === 'present');
+    assertTrue(restoredAttendance.every(a => a.price === 15000), 'Deshacer must restore every session\'s original frozen price');
+
+    // --- Entry point 2: Cuentas -> patient sheet -> "Editar". ---
+    await page.locator('button[data-act="patient-accounts"]', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('#accounts-sheet[open]');
+    await page.click('#accounts-price-history [data-act="edit-price-history"]');
+    await page.waitForSelector('dialog#price-history[open]');
+    assertEqual(await page.locator('.price-edit-row').count(), 1, 'reopening after Deshacer must show the restored single segment');
+
+    // --- A future-dated segment saves directly, no confirmation, no re-pricing. ---
+    const futureFrom = iso(addDays(ANCHOR, 30));
+    await page.click('#price-history-add');
+    assertEqual(await page.locator('.price-edit-row').count(), 2, 'Agregar precio must add a row');
+    const newRow = page.locator('.price-edit-row').first(); // newest-first: the just-added row (dated today) sorts on top
+    await newRow.locator('.ph-date').fill(futureFrom);
+    await newRow.locator('.ph-amount').fill('19000');
+    await newRow.locator('.ph-amount').blur();
+    await page.waitForTimeout(100);
+    await page.click('#price-history-save');
+    await page.waitForSelector('#price-history[open]', { state: 'hidden' });
+    await page.waitForTimeout(700);
+    assertTrue((await page.locator('#toast').innerText()).includes('Precios actualizados'),
+      'a future-only edit (nothing re-priced) must show the plain toast, no Deshacer action');
+    assertEqual(await page.locator('.toast-action').count(), 0, 'no undo action is offered when nothing was re-priced');
+
+    server = await readServerData(page);
+    martina = server.data.patients.find(p => p.id === 'p1');
+    assertEqual(martina.prices.length, 2, 'the future segment must be saved alongside the original');
+    const stillFrozen = server.data.attendance.filter(a => a.patientId === 'p1' && a.status === 'present');
+    assertTrue(stillFrozen.every(a => a.price === 15000), 'a future-only edit must never touch already-marked attendance');
+
+    // --- Delete that future segment, validation: empty amount is rejected. ---
+    await page.click('#accounts-close'); // close so the next open starts from a clean accounts sheet
+    await page.locator('button[data-act="patient-accounts"]', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('#accounts-sheet[open]');
+    await page.click('#accounts-price-history [data-act="edit-price-history"]');
+    await page.waitForSelector('dialog#price-history[open]');
+    assertEqual(await page.locator('.price-edit-row').count(), 2, 'both segments must still be listed');
+    await page.locator('.price-edit-row').first().locator('.ph-amount').fill('');
+    await page.click('#price-history-save');
+    assertTrue(!(await page.locator('#price-history-error').isHidden()), 'an empty amount must show an inline error, not alert()');
+    assertTrue(await page.locator('dialog#price-history[open]').count() === 1, 'the dialog must stay open on a validation error');
+
+    await page.locator('.price-edit-row').first().locator('[data-act="ph-delete"]').click();
+    assertEqual(await page.locator('.price-edit-row').count(), 1, 'deleting the future segment must remove it from the list');
+    await page.click('#price-history-save');
+    await page.waitForSelector('#price-history[open]', { state: 'hidden' });
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    martina = server.data.patients.find(p => p.id === 'p1');
+    assertEqual(martina.prices.length, 1, 'after deleting it and saving, only the original segment remains');
+
+    // --- Quick price edit (the existing "now" flow) still never re-prices. ---
+    await page.click('#accounts-close'); // close the accounts sheet, still open behind the price-history dialog
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.fill('#editor-form [name="price"]', '16500');
+    await page.click('#editor-form button[type="submit"]');
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    const quickEditAttendance = server.data.attendance.filter(a => a.patientId === 'p1' && a.status === 'present');
+    assertTrue(quickEditAttendance.every(a => a.price === 15000), 'the quick "now" price edit must never re-price already-marked attendance');
+  } finally {
+    await context.close();
+  }
+}
+
 /* ---------- screenshots ---------- */
 async function takeScreenshots(browser, origin) {
   fs.mkdirSync(SHOTS_DIR, { recursive: true });
@@ -1167,6 +1322,46 @@ async function takeScreenshots(browser, origin) {
       await page.locator('#sessions-section').scrollIntoViewIfNeeded();
       await page.waitForTimeout(100);
       await page.screenshot({ path: path.join(SHOTS_DIR, 'pacientes-editor-sesiones.png') });
+
+      // precios-dialog.png: Martina's price timeline with a past, current and scheduled
+      // ("programado") segment all visible together.
+      await page.click('#price-history-open');
+      await page.waitForSelector('dialog#price-history[open]');
+      // Each "Agregar precio" click adds a row defaulting to from=today (ANCHOR_ISO) — find
+      // it by that date value once, then keep targeting it by its stable data-key so a
+      // later edit to that same date field never invalidates the locator.
+      await page.click('#price-history-add');
+      const pastKey = await page.locator('.price-edit-row').filter({ has: page.locator(`.ph-date[value="${ANCHOR_ISO}"]`) }).getAttribute('data-key');
+      const pastRow = page.locator(`.price-edit-row[data-key="${pastKey}"]`);
+      await pastRow.locator('.ph-amount').fill('13000');
+      await pastRow.locator('.ph-amount').blur();
+      await page.waitForTimeout(100);
+      await pastRow.locator('.ph-date').fill(iso(addDays(ANCHOR, -200)));
+      await pastRow.locator('.ph-date').blur();
+      await page.waitForTimeout(100);
+      await page.click('#price-history-add');
+      const futureKey = await page.locator('.price-edit-row').filter({ has: page.locator(`.ph-date[value="${ANCHOR_ISO}"]`) }).getAttribute('data-key');
+      const futureRow = page.locator(`.price-edit-row[data-key="${futureKey}"]`);
+      await futureRow.locator('.ph-amount').fill('18000');
+      await futureRow.locator('.ph-amount').blur();
+      await page.waitForTimeout(100);
+      await futureRow.locator('.ph-date').fill(iso(addDays(ANCHOR, 30)));
+      await futureRow.locator('.ph-date').blur();
+      await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'precios-dialog.png') });
+
+      // precios-confirm.png: editing the current segment's amount re-prices her existing
+      // attendance, so Guardar must land on the confirmation step.
+      const currentRow = page.locator('.price-edit-row.current');
+      await currentRow.locator('.ph-amount').fill('17000');
+      await currentRow.locator('.ph-amount').blur();
+      await page.waitForTimeout(100);
+      await page.click('#price-history-save');
+      await page.waitForSelector('#price-history-confirm:not([hidden])');
+      await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(SHOTS_DIR, 'precios-confirm.png') });
+      await page.click('#price-history-confirm-back');
+      await page.click('#price-history-close');
     } finally {
       await context.close();
     }
@@ -1238,6 +1433,9 @@ async function main() {
 
     // Phase 5: 5-minute picker, one-off changes from the patient editor
     await check('editor "Próximas sesiones": Mover/No viene/Agregar sesión/Deshacer, Hoy+Semana reflect each, fixed schedule untouched', () => scenarioEditorSessions(browser, origin));
+
+    // Phase 6: full price history editor, re-pricing with confirmation + undo
+    await check('price history editor: both entry points, re-pricing confirmation + Actualizar + Deshacer, future-only edit skips confirmation, delete, validation, quick edit unaffected', () => scenarioPriceHistoryEditor(browser, origin));
 
     console.log('\nTaking screenshots...');
     await takeScreenshots(browser, origin);
