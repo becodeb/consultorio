@@ -135,6 +135,22 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
       sha256 equal local. Parent re-ran e2e: 16/16; parent fixed the sessions section
       padding and one-line rows (afad1c2).
 
+## Phase 6 scope (authorized by the user on 2026-10-18)
+
+- Full price-history editor per patient: a list of "from date → price" segments she can
+  add/edit/delete, including the past ("hasta acá le cobraba tanto, desde esta fecha tanto"),
+  so monthly totals reflect what she really charges. Keep the current quick price edit.
+- Decision (coordinator, stated to the user): editing past segments re-prices already-marked
+  present sessions in the affected ranges, after a confirmation showing how many sessions and
+  the total difference; undoable. Payments are never changed.
+
+### Phase 6 tasks
+
+- [ ] T23 Price history editor (modal), re-pricing of affected sessions with confirmation +
+      undo, entry points from the patient editor and the Cuentas patient sheet, voice support
+      for past-dated price changes.
+- [ ] T24 Redeploy to Coolify + live checks (coordinator).
+
 ## Acceptance criteria
 
 - Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
