@@ -161,7 +161,9 @@ only accepted today or later, and she did not find "Historial". Route: direct in
       it goes through the price history confirmation (N sessions, difference, Deshacer).
       A hint under the date explains it. Schedule changes stay today-or-future.
       Checks: e2e 18/18 (new scenario `scenarioRetroactiveQuickPrice`).
-- [ ] T26 Redeploy to Coolify + live checks.
+- [x] T26 Redeploy to Coolify + live checks: deploy `5sy0dwmnphjpf4ethva68mqv` of 577ae17
+      finished; `/api/health` 200; the page loads `app.js?v=<deploy>` with the new code.
+      Bare `/app.js` is a stale Cloudflare HIT (max-age 4h), harmless: the page never uses it.
 
 ## Acceptance criteria
 
