@@ -1040,6 +1040,53 @@ async function scenarioVoiceScheduledChanges(browser, origin) {
 
 /* ---------- scenarios: phase 6 (full price history editor) ---------- */
 
+async function scenarioRetroactiveQuickPrice(browser, origin) {
+  const { context, page } = await freshPage(browser);
+  try {
+    const email = nextEmail('retroprice');
+    await signup(page, origin, email);
+    await seedServer(page, buildSeed());
+    await page.evaluate(() => window.save());
+    await page.waitForTimeout(700);
+
+    // Martina (p1) has 6 present sessions frozen at $15.000. A raise "a partir de" the
+    // day of her first one, entered through the quick "Programar cambio", re-prices all 6.
+    let server = await readServerData(page);
+    const firstPresent = server.data.attendance
+      .filter(a => a.patientId === 'p1' && a.status === 'present')
+      .map(a => a.date).sort()[0];
+
+    await goToView(page, 'pacientes');
+    await page.locator('button.row', { hasText: 'Martina López' }).click();
+    await page.waitForSelector('dialog#editor[open]');
+    await page.fill('#editor-form input[name="price"]', '17000');
+    await page.click('#price-change-toggle');
+    assertTrue(await page.locator('#price-from-hint').isHidden(), 'the past-date hint must stay hidden for a future date');
+    await page.fill('#price-from-field input[name="priceFrom"]', firstPresent);
+    assertTrue(!(await page.locator('#price-from-hint').isHidden()), 'a past date must show the re-pricing hint');
+    await page.click('#editor-form button[type="submit"]');
+
+    await page.waitForSelector('#price-history-confirm:not([hidden])');
+    const summary = await page.locator('#price-history-confirm-summary').innerText();
+    assertTrue(summary.includes('6') && summary.includes('12.000'), `confirmation must state 6 sessions, +$12.000 (got: "${summary}")`);
+    server = await readServerData(page);
+    assertTrue(server.data.attendance.filter(a => a.patientId === 'p1' && a.status === 'present').every(a => a.price === 15000),
+      'nothing must be re-priced before confirming');
+
+    await page.click('#price-history-confirm-apply');
+    await page.waitForSelector('#price-history[open]', { state: 'hidden' });
+    await page.waitForTimeout(700);
+    server = await readServerData(page);
+    const martina = server.data.patients.find(p => p.id === 'p1');
+    assertEqual(martina.prices.at(-1).from, firstPresent, 'the new segment must start on the chosen past date');
+    assertEqual(martina.prices.at(-1).amount, 17000, 'the new segment must hold the new price');
+    assertTrue(server.data.attendance.filter(a => a.patientId === 'p1' && a.status === 'present').every(a => a.price === 17000),
+      'every present session from that day on must be re-priced');
+  } finally {
+    await context.close();
+  }
+}
+
 async function scenarioPriceHistoryEditor(browser, origin) {
   const { context, page } = await freshPage(browser);
   try {
@@ -1435,6 +1482,7 @@ async function main() {
     await check('editor "Próximas sesiones": Mover/No viene/Agregar sesión/Deshacer, Hoy+Semana reflect each, fixed schedule untouched', () => scenarioEditorSessions(browser, origin));
 
     // Phase 6: full price history editor, re-pricing with confirmation + undo
+    await check('quick editor: a past "Programar cambio" price date re-prices marked sessions after confirmation', () => scenarioRetroactiveQuickPrice(browser, origin));
     await check('price history editor: both entry points, re-pricing confirmation + Actualizar + Deshacer, future-only edit skips confirmation, delete, validation, quick edit unaffected', () => scenarioPriceHistoryEditor(browser, origin));
 
     console.log('\nTaking screenshots...');

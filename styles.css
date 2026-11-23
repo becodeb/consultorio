@@ -461,6 +461,8 @@ dialog h2 { margin: 0 0 18px; font: 700 24px/1.2 var(--display); }
 .link-btn + .link-btn { margin-left: 16px; }
 .from-field { margin-bottom: 10px; }
 .from-field[hidden] { display: none; }
+.field-hint { margin: -4px 0 10px; font-size: 13px; color: var(--muted, #666); }
+.field-hint[hidden] { display: none; }
 .upcoming-list:empty { display: none; }
 .upcoming-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

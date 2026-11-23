@@ -1418,13 +1418,21 @@ document.getElementById('schedule-upcoming').addEventListener('click', e => {
   save(); renderScheduleUpcoming(p); render();
 });
 
+// Price changes may start in the past: a past "A partir de" re-prices the sessions already
+// marked from that day on, through the price history editor's confirmation step.
+function updatePriceFromHint() {
+  const value = form.elements.priceFrom.value;
+  document.getElementById('price-from-hint').hidden =
+    !(ISO_DATE_RE.test(value) && value < iso(new Date()) && state.editing);
+}
+form.elements.priceFrom.addEventListener('input', updatePriceFromHint);
+form.elements.priceFrom.addEventListener('change', updatePriceFromHint);
 document.getElementById('price-change-toggle').onclick = () => {
   priceFromField.hidden = !priceFromField.hidden;
   if (!priceFromField.hidden) {
-    const todayIso = iso(new Date());
-    form.elements.priceFrom.min = todayIso;
     if (!form.elements.priceFrom.value) form.elements.priceFrom.value = iso(addDays(new Date(), 1));
   }
+  updatePriceFromHint();
 };
 document.getElementById('schedule-change-toggle').onclick = () => {
   scheduleFromField.hidden = !scheduleFromField.hidden;
@@ -1469,6 +1477,7 @@ function openEditor(p) {
   form.elements.price.value = p ? priceOn(p, todayIso) : '';
   form.elements.priceFrom.value = '';
   priceFromField.hidden = true;
+  document.getElementById('price-from-hint').hidden = true;
   form.elements.scheduleFrom.value = '';
   scheduleFromField.hidden = true;
   slotsEl.innerHTML = '';
@@ -1557,7 +1566,8 @@ form.addEventListener('submit', e => {
   const todayIso = iso(new Date());
   const priceFrom = (!priceFromField.hidden && form.elements.priceFrom.value) ? form.elements.priceFrom.value : todayIso;
   const scheduleFrom = (!scheduleFromField.hidden && form.elements.scheduleFrom.value) ? form.elements.scheduleFrom.value : todayIso;
-  if (priceFrom < todayIso || scheduleFrom < todayIso) { toast('La fecha tiene que ser hoy o futura'); return; }
+  if (!ISO_DATE_RE.test(priceFrom)) { toast('Fecha inválida'); return; }
+  if (scheduleFrom < todayIso) { toast('La fecha del horario tiene que ser hoy o futura'); return; }
 
   const existing = findPatient(db, state.editing);
   let patient = existing;
@@ -1567,11 +1577,33 @@ form.addEventListener('submit', e => {
   } else {
     patient.name = name;
   }
-  setPriceFrom(patient, priceFrom, price);
   setScheduleFrom(patient, scheduleFrom, schedule);
+  if (existing && priceFrom < todayIso) {
+    // Retroactive price: same path as the price history editor, so already-marked
+    // sessions in the range are re-priced only after an explicit confirmation.
+    save(); editor.close(); render();
+    applyRetroactivePrice(patient.id, priceFrom, price);
+    return;
+  }
+  setPriceFrom(patient, priceFrom, price);
   save(); editor.close(); render();
   toast(existing ? 'Cambios guardados' : 'Paciente agregado');
 });
+
+function applyRetroactivePrice(patientId, from, amount) {
+  const p = findPatient(db, patientId);
+  if (!p) return;
+  const normalized = normalizePriceEntries([...p.prices, { from, amount }]);
+  const affected = affectedAttendanceForRepricing(db, patientId, normalized);
+  if (!affected.length) {
+    commitPriceHistory(patientId, normalized, []);
+    return;
+  }
+  openPriceHistory(patientId);
+  priceHistoryCtx.draft = normalized.map(e => ({ ...e, _key: uid() }));
+  renderPriceHistoryTimeline();
+  showPriceHistoryConfirm(normalized, affected);
+}
 
 /* ---------- actions ---------- */
 app.addEventListener('click', e => {

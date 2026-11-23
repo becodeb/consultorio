@@ -153,6 +153,16 @@ Route: delegated direct — one writer (writer trigger: 2+ non-trivial files).
       of 2c1d6e7 finished; `/`, `/api/health`, manifest 200, `/api/me` 401; served app.js
       and styles.css sha256 equal local. Parent re-ran e2e: 17/17.
 
+## Phase 7 scope (requested by the user on 2026-11-23)
+
+The user could not raise a patient's price from a past date: the editor's "Programar cambio"
+only accepted today or later, and she did not find "Historial". Route: direct inline.
+- [x] T25 Quick editor "Programar cambio" accepts a past price date for an existing patient;
+      it goes through the price history confirmation (N sessions, difference, Deshacer).
+      A hint under the date explains it. Schedule changes stay today-or-future.
+      Checks: e2e 18/18 (new scenario `scenarioRetroactiveQuickPrice`).
+- [ ] T26 Redeploy to Coolify + live checks.
+
 ## Acceptance criteria
 
 - Marking "Vino" shows the row green; "No vino" red; both are reversible explicitly.
